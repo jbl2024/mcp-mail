@@ -1,5 +1,10 @@
 # Changelog
 
+## [20261004-3] - 2026-10-04
+
+- feat: separate production installation from MCP startup (88c5d5b)
+
+
 ## [Unreleased]
 
 - Add production installation and a launcher that never synchronizes dependencies.
