@@ -224,7 +224,7 @@ def test_only_allowlisted_folders(reader):
         lambda c: c["accounts"][0].update(folders=[]),
         lambda c: c["accounts"].append(c["accounts"][0]),
         lambda c: c["settings"].update(max_results=True),
-        lambda c: c.update(calendars=[]),
+        lambda c: c.update(unknown_section=[]),
         lambda c: c["credentials"]["default"].update(password="forbidden"),
     ],
 )

@@ -88,9 +88,9 @@ il vérifie les dossiers, recherche cinq mails maximum et lit le premier message
 si disponible. Il n’affiche que des compteurs et statuts, sans corps ni identifiants
 de messages. `--live` est obligatoire pour autoriser une connexion réelle.
 
-Le projet local `mail-smoke/` fournit également `make test-real`. Son ancien
-fichier privé de configuration CalDAV doit être remplacé manuellement par une
-configuration IMAP ; aucune donnée privée n’est migrée automatiquement.
+Le dossier `mail-smoke/`, inclus dans ce dépôt, fournit également `make test-real`.
+Créer ses fichiers privés `config.yaml` et `.env` à partir des exemples, puis
+renseigner les paramètres IMAP. Ces fichiers privés restent ignorés par Git.
 
 `make build` construit le paquet ; `make release` conserve le mécanisme de release
 avec tests, changelog, commit et publication atomique vers le remote configuré.
