@@ -42,7 +42,7 @@ class AccountConfig:
     port: int
     security: str
     credentials: str
-    folders: tuple[str, ...]
+    folders: tuple[str, ...] | None = None
 
 
 @dataclass(frozen=True)
@@ -122,15 +122,15 @@ def load_config(path: str | Path | None = None) -> AppConfig:
         profile = item.get("credentials")
         if not isinstance(profile, str) or profile not in credentials:
             raise ConfigError("Unknown credential profile")
-        folders = item.get("folders", ["INBOX"])
-        if (
+        folders = item.get("folders")
+        if folders is not None and (
             not isinstance(folders, list)
             or not folders
             or not all(
                 isinstance(f, str) and f and not any(c in f for c in "\r\n\x00") for f in folders
             )
         ):
-            raise ConfigError("folders must be a non-empty explicit allowlist")
+            raise ConfigError("folders must be omitted or a non-empty explicit allowlist")
         label = item.get("label", name)
         if not isinstance(label, str) or not label.strip():
             raise ConfigError("Invalid account label")
@@ -141,6 +141,6 @@ def load_config(path: str | Path | None = None) -> AppConfig:
             _integer(item.get("port", 993 if security == "tls" else 143), "port", 65535),
             security,
             profile,
-            tuple(dict.fromkeys(folders)),
+            tuple(dict.fromkeys(folders)) if folders is not None else None,
         )
     return AppConfig(settings, credentials, accounts)

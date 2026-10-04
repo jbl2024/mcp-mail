@@ -17,7 +17,11 @@ class MailService:
     def list_accounts(self):
         return {
             "accounts": [
-                {"name": a.name, "label": a.label, "folders": list(a.folders)}
+                {
+                    "name": a.name,
+                    "label": a.label,
+                    "folders": list(a.folders) if a.folders is not None else None,
+                }
                 for a in self.config.accounts.values()
             ]
         }

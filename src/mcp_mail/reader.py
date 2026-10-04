@@ -29,7 +29,15 @@ class MailReader:
 
     @contextmanager
     def session(self, folder=None, uidvalidity=None):
-        if folder is not None and folder not in self.account.folders:
+        if folder is not None and (
+            not isinstance(folder, str) or not folder or any(c in folder for c in "\r\n\x00")
+        ):
+            raise MailReadError("Invalid folder name")
+        if (
+            folder is not None
+            and self.account.folders is not None
+            and folder not in self.account.folders
+        ):
             raise MailReadError("Folder is outside the configured allowlist")
         client = None
         try:
@@ -63,17 +71,28 @@ class MailReader:
                 with suppress(Exception):
                     client.logout()
 
+    def _folders(self, client):
+        listed = {name: flags for flags, _, name in client.list_folders()}
+        names = self.account.folders if self.account.folders is not None else sorted(listed)
+        return [
+            {
+                "name": name,
+                "selectable": name in listed
+                and not any(
+                    (flag.decode() if isinstance(flag, bytes) else flag).lower() == "\\noselect"
+                    for flag in listed[name]
+                ),
+            }
+            for name in names
+        ]
+
     def list_folders(self):
         with self.session() as (client, _):
-            listed = {name: flags for flags, _, name in client.list_folders()}
-            return [
-                {"name": name, "selectable": name in listed and b"\\Noselect" not in listed[name]}
-                for name in self.account.folders
-            ]
+            return self._folders(client)
 
     def search_messages(
         self,
-        folder="INBOX",
+        folder=None,
         query="",
         sender="",
         recipient="",
@@ -125,29 +144,79 @@ class MailReader:
                 criteria.extend([key, dates[key]])
         if len(dates) == 2 and dates["SINCE"] >= dates["BEFORE"]:
             raise MailReadError("before must be after since")
+        # A specific folder is validated by session(); the broad search discovers folders.
         with self.session(folder) as (client, validity):
-            uids = sorted(client.search(criteria, charset="UTF-8"), reverse=True)
-            page = uids[offset : offset + limit]
-            data = client.fetch(page, [HEADER_FETCH, "FLAGS", "RFC822.SIZE"]) if page else {}
-            messages = [
-                summary(
-                    parse_message(data[uid][HEADER_KEY]),
-                    uid,
-                    data[uid].get(b"FLAGS", ()),
-                    data[uid].get(b"RFC822.SIZE", 0),
-                )
-                for uid in page
-                if uid in data and HEADER_KEY in data[uid]
-            ]
-            return {
+            folders = (
+                [folder]
+                if folder is not None
+                else sorted(f["name"] for f in self._folders(client) if f["selectable"])
+            )
+            matches = []
+            errors = []
+            searched = []
+            for name in folders:
+                try:
+                    current = validity
+                    if folder is None:
+                        current = client.select_folder(name, readonly=True).get(b"UIDVALIDITY")
+                        if type(current) is not int or current < 1:
+                            raise MailReadError("Server did not return UIDVALIDITY")
+                    uids = sorted(client.search(criteria, charset="UTF-8"), reverse=True)
+                    matches.extend((name, current, uid) for uid in uids)
+                    searched.append(name)
+                except Exception as exc:
+                    if folder is not None:
+                        raise MailReadError("IMAP folder search failed") from exc
+                    errors.append({"folder": name, "error": "IMAP folder search failed"})
+            page = matches[offset : offset + limit]
+            messages = []
+            for name in dict.fromkeys(hit[0] for hit in page):
+                hits = [hit for hit in page if hit[0] == name]
+                current = hits[0][1]
+                try:
+                    if folder is None:
+                        selected = client.select_folder(name, readonly=True)
+                        if selected.get(b"UIDVALIDITY") != current:
+                            raise MailReadError("UIDVALIDITY changed; search again")
+                    data = client.fetch(
+                        [hit[2] for hit in hits], [HEADER_FETCH, "FLAGS", "RFC822.SIZE"]
+                    )
+                    for _, _, uid in hits:
+                        if uid in data and HEADER_KEY in data[uid]:
+                            messages.append(
+                                summary(
+                                    parse_message(data[uid][HEADER_KEY]),
+                                    uid,
+                                    data[uid].get(b"FLAGS", ()),
+                                    data[uid].get(b"RFC822.SIZE", 0),
+                                )
+                                | {
+                                    "account": self.account.name,
+                                    "folder": name,
+                                    "uidvalidity": current,
+                                }
+                            )
+                except Exception as exc:
+                    if folder is not None:
+                        raise MailReadError("IMAP header read failed") from exc
+                    errors.append(
+                        {"folder": name, "error": "IMAP header read failed; search again"}
+                    )
+            result = {
                 "account": self.account.name,
                 "folder": folder,
                 "uidvalidity": validity,
-                "total": len(uids),
+                "folders_queried": searched,
+                "total": len(matches),
                 "offset": offset,
+                "order": "folder name ascending, then UID descending",
                 "messages": messages,
-                "next_offset": offset + limit if offset + limit < len(uids) else None,
+                "next_offset": offset + limit if offset + limit < len(matches) else None,
+                "partial": bool(errors),
             }
+            if errors:
+                result["errors"] = errors
+            return result
 
     def _message(self, client, uid):
         if type(uid) is not int or not 1 <= uid <= 4294967295:

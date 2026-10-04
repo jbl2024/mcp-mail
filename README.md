@@ -11,8 +11,9 @@ cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-Renseigner les variables de connexion dans `.env`, puis adapter les comptes et la liste
-explicite des dossiers autorisés dans `config.yaml`. Les identifiants sont uniquement
+Renseigner les variables de connexion dans `.env`, puis adapter les comptes dans
+`config.yaml`. Tous les dossiers du serveur sont accessibles par défaut. Une liste
+`folders` facultative permet de restreindre les dossiers accessibles. Les identifiants sont uniquement
 référencés par noms de variables d’environnement. TLS avec vérification des certificats
 est obligatoire : `security: tls` (port 993) ou `security: starttls` (port 143).
 Plusieurs comptes et profils de connexion sont possibles.
@@ -29,8 +30,8 @@ et `mcp-mail`. `MCP_MAIL_CONFIG` choisit le fichier YAML (défaut : `config.yaml
 
 | Outil | Fonction |
 |---|---|
-| `list_accounts` | Alias, labels et dossiers configurés |
-| `list_folders` | Dossiers autorisés et disponibilité |
+| `list_accounts` | Alias, labels et restriction facultative de dossiers |
+| `list_folders` | Découverte des dossiers du serveur et disponibilité |
 | `search_messages` | Recherche IMAP côté serveur et en-têtes paginés |
 | `get_message` | Corps MIME en Markdown et métadonnées des pièces jointes |
 | `get_attachment` | Pièce jointe encodée en base64, sans écriture de fichier |
@@ -44,8 +45,19 @@ Les dates utilisent `YYYY-MM-DD`, sur la date interne IMAP : début inclus, fin 
 Les chaînes sont échappées par IMAPClient ; aucun critère IMAP brut n’est exposé.
 Les recherches Unicode utilisent UTF-8 ; le serveur doit accepter ce charset.
 
-Les résultats sont classés par UID décroissant (ordre d’arrivée dans le dossier).
+Sans `folder`, la recherche parcourt tous les dossiers sélectionnables accessibles
+du compte demandé, y compris les archives et les messages envoyés. Avec
+`folder: "INBOX"` ou `folder: "Archive"`, elle cible uniquement ce dossier.
+Une restriction `folders` configurée reste appliquée à toutes les opérations.
+Les résultats sont classés par nom de dossier puis UID décroissant dans chaque
+dossier ; il ne s’agit pas d’un classement chronologique global.
 `limit` et `offset` paginent les en-têtes ; `total` et `next_offset` sont retournés.
+Chaque résultat porte `account`, `folder`, `uid` et `uidvalidity` : les UIDs ne
+sont pas comparables entre dossiers. Un message présent dans plusieurs dossiers
+peut apparaître plusieurs fois. `partial` et `errors` signalent les dossiers dont
+la recherche ou la lecture a échoué ; `total` compte les correspondances des
+dossiers recherchés avec succès. Une recherche sur plusieurs dossiers prend
+plus de temps, car IMAP recherche dossier par dossier.
 Les UIDs correspondants sont récupérés par SEARCH ; seuls les en-têtes de la page
 sont téléchargés. La pagination reflète l’état courant, et peut bouger à l’arrivée
 ou suppression d’un mail.
@@ -84,7 +96,8 @@ uv run --env-file .env mail-smoke --config config.yaml --live
 
 `make test` utilise exclusivement des réponses IMAP simulées et un dépôt Git local
 pour les tests de release. Le smoke appelle directement le service sans lancer MCP :
-il vérifie les dossiers, recherche cinq mails maximum et lit le premier message
+il découvre les dossiers sélectionnables, recherche cinq mails maximum par dossier
+et lit le premier message
 si disponible. Il n’affiche que des compteurs et statuts, sans corps ni identifiants
 de messages. `--live` est obligatoire pour autoriser une connexion réelle.
 

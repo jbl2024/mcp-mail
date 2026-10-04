@@ -87,7 +87,10 @@ class FakeIMAP:
 def config(monkeypatch):
     monkeypatch.setenv("MAIL_USERNAME", "mail-user@example.test")
     monkeypatch.setenv("MAIL_PASSWORD", "fictional-test-value")
-    return load_config("config.example.yaml")
+    config = load_config("config.example.yaml")
+    return replace(
+        config, accounts={"primary": replace(config.accounts["primary"], folders=("INBOX",))}
+    )
 
 
 @pytest.fixture
@@ -105,6 +108,7 @@ def reader(config):
 
 def test_search_pagination_filters_and_header_only(reader):
     result = reader.search_messages(
+        folder="INBOX",
         seen=False,
         flagged=True,
         important=True,
@@ -200,7 +204,7 @@ def test_size_limits(reader):
 def test_failure_is_sanitized_and_logs_out(reader):
     reader.fake.fail = True
     with pytest.raises(MailReadError) as error:
-        reader.search_messages()
+        reader.search_messages(folder="INBOX")
     assert "sensitive" not in str(error.value)
     assert reader.fake.calls[-1] == ("logout",)
 
@@ -375,3 +379,141 @@ def test_reader_has_only_allowlisted_imap_calls():
         "fetch",
     }
     assert "select_folder" in calls and "fetch" in calls
+
+
+def test_no_folder_restriction_by_default():
+    config = load_config("config.example.yaml")
+    assert config.accounts["primary"].folders is None
+    assert MailService(config).list_accounts()["accounts"][0]["folders"] is None
+
+
+class MultiFolderIMAP(FakeIMAP):
+    def __init__(self):
+        super().__init__(use_uid=True)
+        self.folders = {
+            "Archive": {1: mail("archived"), 2: mail("archived-reply")},
+            "INBOX": {1: mail("inbox")},
+            "Sent": {1: mail("sent")},
+        }
+        self.validities = {"Archive": 10, "INBOX": 20, "Sent": 30}
+        self.current = None
+        self.fail_folder = None
+        self.change_validity = False
+        self.selections = {}
+
+    def list_folders(self):
+        return [((), b"/", f) for f in self.folders] + [(("\\Noselect",), b"/", "Parent")]
+
+    def select_folder(self, folder, readonly):
+        assert readonly is True
+        self.calls.append(("examine", folder))
+        if folder == self.fail_folder:
+            raise RuntimeError("private server details")
+        self.current = folder
+        self.messages = self.folders[folder]
+        self.selections[folder] = self.selections.get(folder, 0) + 1
+        validity = self.validities[folder]
+        if self.change_validity and self.selections[folder] > 1:
+            validity += 1
+        return {b"UIDVALIDITY": validity}
+
+
+@pytest.fixture
+def multi_reader(config):
+    client = MultiFolderIMAP()
+    value = MailReader(
+        replace(config.accounts["primary"], folders=None),
+        config.credentials["default"],
+        config.settings,
+        client_factory=lambda *args, **kwargs: _factory(client, kwargs),
+    )
+    value.fake = client
+    return value
+
+
+def test_discovers_unrestricted_folders(multi_reader):
+    assert multi_reader.list_folders() == [
+        {"name": "Archive", "selectable": True},
+        {"name": "INBOX", "selectable": True},
+        {"name": "Parent", "selectable": False},
+        {"name": "Sent", "selectable": True},
+    ]
+
+
+def test_all_folders_search_and_global_pagination(multi_reader):
+    result = multi_reader.search_messages(limit=2, offset=1, seen=False)
+    assert result["total"] == 4
+    assert result["folders_queried"] == ["Archive", "INBOX", "Sent"]
+    assert [(m["folder"], m["uid"], m["uidvalidity"]) for m in result["messages"]] == [
+        ("Archive", 1, 10),
+        ("INBOX", 1, 20),
+    ]
+    assert result["next_offset"] == 3
+    assert not result["partial"]
+    searches = [call for call in multi_reader.fake.calls if call[0] == "search"]
+    assert len(searches) == 3 and all("UNSEEN" in call[1] for call in searches)
+    fetched = [call for call in multi_reader.fake.calls if call[0] == "fetch"]
+    assert sum(len(call[1]) for call in fetched) == 2
+    assert ("examine", "Parent") not in multi_reader.fake.calls
+    last = multi_reader.search_messages(limit=2, offset=3)
+    assert [m["folder"] for m in last["messages"]] == ["Sent"]
+    assert last["next_offset"] is None
+
+
+def test_explicit_folder_searches_only_that_folder(multi_reader):
+    result = multi_reader.search_messages(folder="Sent")
+    assert result["folders_queried"] == ["Sent"]
+    assert result["uidvalidity"] == 30
+    assert len([c for c in multi_reader.fake.calls if c[0] == "search"]) == 1
+    assert multi_reader.get_message("Sent", 1, 30)["message"]["message_id"] == "<sent@example.test>"
+
+
+def test_optional_allowlist_applies_to_discovery_search_and_reads(multi_reader):
+    multi_reader.account = replace(multi_reader.account, folders=("INBOX",))
+    assert multi_reader.list_folders() == [{"name": "INBOX", "selectable": True}]
+    assert multi_reader.search_messages()["folders_queried"] == ["INBOX"]
+    with pytest.raises(MailReadError, match="allowlist"):
+        multi_reader.search_messages(folder="Sent")
+    with pytest.raises(MailReadError, match="allowlist"):
+        multi_reader.get_message("Sent", 1, 30)
+
+
+def test_global_search_reports_partial_errors(multi_reader):
+    multi_reader.fake.fail_folder = "Archive"
+    result = multi_reader.search_messages()
+    assert result["partial"]
+    assert result["total"] == 2
+    assert result["errors"] == [{"folder": "Archive", "error": "IMAP folder search failed"}]
+    assert "private" not in str(result)
+    assert result["folders_queried"] == ["INBOX", "Sent"]
+
+
+def test_uidvalidity_change_between_search_and_fetch(multi_reader):
+    multi_reader.fake.change_validity = True
+    result = multi_reader.search_messages()
+    assert result["partial"]
+    assert result["messages"] == []
+    assert len(result["errors"]) == 3
+    assert not any(c[0] == "fetch" for c in multi_reader.fake.calls)
+
+
+def test_no_selectable_folders(multi_reader):
+    multi_reader.fake.folders = {}
+    result = multi_reader.search_messages()
+    assert result["total"] == 0 and result["messages"] == []
+    assert result["folders_queried"] == []
+    assert not result["partial"]
+
+
+async def test_smoke_discovers_folders(config, multi_reader, monkeypatch, capsys):
+    from argparse import Namespace
+
+    from mcp_mail import smoke
+
+    service = MailService(config)
+    service.readers["primary"] = multi_reader
+    monkeypatch.setattr(smoke, "MailService", lambda config: service)
+    await smoke.run(Namespace(config="config.example.yaml"))
+    output = capsys.readouterr().out
+    assert output.count('"status": "ok"') == 3
+    assert "Parent" not in output

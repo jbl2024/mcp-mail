@@ -17,4 +17,5 @@ accounts:
     port: 993
     security: tls
     credentials: default
-    folders: [INBOX]
+    # Optional restriction; omit to access all server folders.
+    # folders: [INBOX, Archive]

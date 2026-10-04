@@ -35,7 +35,7 @@ async def _call(operation, account, **kwargs):
 
 @mcp.tool(annotations=READ_ONLY)
 def list_accounts() -> dict:
-    """List configured account aliases and allowed folders."""
+    """List account aliases; folders=null means unrestricted folder access."""
     try:
         return _service().list_accounts()
     except ConfigError as exc:
@@ -44,14 +44,14 @@ def list_accounts() -> dict:
 
 @mcp.tool(annotations=READ_ONLY)
 async def list_folders(account: str) -> dict:
-    """List allowed folders and whether each is selectable."""
+    """Discover server folders (filtered by optional allowlist) and selectability."""
     return await _call("list_folders", account)
 
 
 @mcp.tool(annotations=READ_ONLY)
 async def search_messages(
     account: str,
-    folder: str = "INBOX",
+    folder: str | None = None,
     query: str = "",
     sender: str = "",
     recipient: str = "",
@@ -64,7 +64,11 @@ async def search_messages(
     limit: int = 50,
     offset: int = 0,
 ) -> dict:
-    """Search server-side; newest UIDs first. query searches TEXT (headers and body).
+    """Search all selectable folders by default; pass folder to search only that folder.
+
+    Results are ordered by folder name, then newest UIDs within each folder.
+    Each message includes account, folder, UID and UIDVALIDITY.
+    query searches TEXT (headers and body). Partial failures are reported explicitly.
 
     since is inclusive, before exclusive, both YYYY-MM-DD (IMAP internal date).
     seen=False selects unread. important means Flagged OR $Important.

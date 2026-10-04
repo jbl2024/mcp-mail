@@ -12,8 +12,11 @@ from .service import MailService
 async def run(args):
     service = MailService(load_config(args.config))
     for account in service.config.accounts.values():
-        await service.call("list_folders", account.name)
-        for folder in account.folders:
+        discovered = await service.call("list_folders", account.name)
+        for entry in discovered["result"]:
+            if not entry["selectable"]:
+                continue
+            folder = entry["name"]
             result = await service.call(
                 "search_messages",
                 account.name,
