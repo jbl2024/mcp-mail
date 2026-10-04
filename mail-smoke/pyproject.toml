@@ -1,0 +1,13 @@
+[project]
+name = "mail-smoke"
+version = "0.1.0"
+description = "Opt-in read-only IMAP smoke without MCP."
+requires-python = ">=3.12"
+dependencies = ["mcp-mail", "pytest>=8.4,<9", "pytest-asyncio>=1.2,<2"]
+
+[tool.uv.sources]
+mcp-mail = { path = "..", editable = true }
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+asyncio_mode = "auto"
