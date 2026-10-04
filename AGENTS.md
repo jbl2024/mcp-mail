@@ -40,7 +40,7 @@ reading, also run the standalone smoke when private connection credentials are
 available and live access is authorized for the task:
 
 ```sh
-uv run --env-file .env mail-smoke --live
+uv run --no-sync --env-file .env python -m mcp_mail.smoke --live
 ```
 
 The private `.env` needs `IMAP_HOST`, `IMAP_USER` and `IMAP_PASSWORD`. TLS on port
@@ -48,7 +48,7 @@ The private `.env` needs `IMAP_HOST`, `IMAP_USER` and `IMAP_PASSWORD`. TLS on po
 set `MCP_MAIL_CONFIG` in `.env` or explicitly pass the YAML file:
 
 ```sh
-uv run --env-file .env mail-smoke --config config.yaml --live
+uv run --no-sync --env-file .env python -m mcp_mail.smoke --config config.yaml --live
 ```
 
 The integrated `mail-smoke/` test project provides an alternative. Run from that
@@ -67,3 +67,12 @@ make test-real
   Use the existing count/status output when reporting smoke results.
 - If credentials or authorized live access are unavailable, report that the live
   smoke was not run; still complete the offline validation.
+
+## Deployment validation
+
+- `make install` provisions the locked production environment without editable mode
+  or development dependencies. It checks imports without contacting IMAP.
+- `make run` starts the installed server without syncing dependencies.
+- After changing deployment scripts, run their isolated tests with `make test`
+  and check a fresh installation in a temporary checkout; do not overwrite the
+  development environment or use real mailbox credentials for startup checks.

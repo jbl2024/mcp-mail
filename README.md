@@ -3,26 +3,90 @@
 Serveur MCP IMAP strictement en lecture seule, Python 3.12+, basé sur IMAPClient.
 Aucun calendrier, envoi, changement de flags, déplacement ou suppression.
 
-## Installation et configuration
+## Installer pour utiliser le serveur MCP
+
+Prérequis : un checkout complet du projet (avec `uv.lock`) et `uv` installé.
+Le projet demande Python 3.12 ou supérieur ; `uv` prépare l’environnement Python.
+Depuis le dossier du projet :
 
 ```sh
-uv sync
-cp .env.example .env
+make install
 ```
 
-Renseigner seulement trois variables dans `.env` : `IMAP_HOST`, `IMAP_USER` et
-`IMAP_PASSWORD`. Le serveur crée le compte `primary`, se connecte en TLS sur le
-port 993 avec vérification des certificats et découvre tous les dossiers.
-Les délais et limites de taille utilisent des valeurs par défaut.
+Sans `make`, utiliser `sh scripts/install.sh`. L’installation utilise le verrou de
+dépendances, installe le paquet et ses dépendances de production dans `.venv`,
+puis vérifie les imports du serveur. Elle ne contacte aucune boîte IMAP et ne
+requiert aucun identifiant. Le paquet est installé sans mode éditable : après une
+mise à jour du code, relancer `make install`, puis redémarrer le client MCP.
+
+L’utilisateur qui installe doit pouvoir créer ou modifier `.venv` et son contenu.
+L’utilisateur qui lance le serveur doit pouvoir lire et exécuter cet environnement.
+Le projet vérifie les permissions de base et explique les échecs d’installation ;
+il ne change pas les propriétaires ou permissions système automatiquement.
+
+### Configurer et lancer
+
+Fournir seulement trois variables au processus : `IMAP_HOST`, `IMAP_USER` et
+`IMAP_PASSWORD`. Le compte s’appelle `primary`, utilise TLS sur le port 993 avec
+vérification des certificats et découvre tous les dossiers. Les délais et limites
+utilisent des valeurs par défaut.
+
+Configurer le client MCP pour exécuter **le script de lancement installé**.
+Exemple à adapter avec le chemin absolu du checkout et les valeurs privées :
+
+```json
+{
+  "mcpServers": {
+    "imap": {
+      "command": "/bin/sh",
+      "args": ["/path/to/mcp-mail/scripts/run.sh"],
+      "env": {
+        "IMAP_HOST": "imap.example.test",
+        "IMAP_USER": "mail-user@example.test",
+        "IMAP_PASSWORD": ""
+      }
+    }
+  }
+}
+```
+
+Le mot de passe vide est un emplacement à renseigner via les paramètres privés
+du client. La forme exacte de cette configuration dépend du client MCP.
+Le transport est stdio : le client lance le processus et communique avec lui.
+
+Pour un lancement manuel avec les variables déjà présentes dans l’environnement :
 
 ```sh
-uv run --env-file .env mcp-mail
+make run
 ```
 
-Le transport MCP est stdio. Pour un client MCP, utiliser `uv` avec les arguments
-`run`, `--directory`, le chemin du projet, `--env-file`, le chemin du fichier privé,
-et `mcp-mail`. Le client peut aussi fournir directement les trois variables
-d’environnement au processus. `.env` est chargé par `uv --env-file`.
+Le script utilise directement `.venv/bin/python -B -m mcp_mail`. Il ne résout,
+n’installe et ne met à jour aucune dépendance, et ne nécessite pas `uv` au lancement.
+Il fonctionne depuis n’importe quel dossier ; les chemins YAML relatifs sont
+résolus par rapport au checkout. Il ne charge pas automatiquement `.env`.
+
+Pour un fichier `.env` privé, copier `.env.example` et renseigner les trois valeurs,
+puis utiliser `uv` uniquement comme lanceur, **sans synchronisation** :
+
+```sh
+uv run --no-sync --env-file .env python -m mcp_mail
+```
+
+Ce lancement suppose que `make install` a déjà réussi. Ne pas utiliser `uv run`
+sans `--no-sync` comme commande de déploiement : il peut tenter de modifier `.venv`
+avant de démarrer le serveur.
+
+### Comprendre une erreur « Permission denied »
+
+Une erreur pendant la suppression ou le remplacement d’un fichier dans `.venv`
+indique que la mise à jour de l’environnement n’a pas pu aboutir. Vérifier son
+propriétaire et les droits avec l’administrateur, puis relancer `make install`
+avec l’utilisateur autorisé. Le script n’efface pas un environnement existant.
+Un démarrage sans synchronisation ne répare pas une installation partielle.
+
+`mail-smoke` est une commande utilitaire installée avec le paquet. Sa présence
+dans un message d’installation ne signifie pas que le smoke a été lancé.
+Il n’est jamais exécuté par l’installation ou le lancement MCP.
 
 ### Configuration avancée facultative
 
@@ -111,24 +175,47 @@ aucun contenu n’est écrit sur disque. Les budgets concernent les données
 conservées et non la mémoire totale du processus. Les champs de mail,
 liens et pièces jointes restent des contenus externes non fiables.
 
-## Tests et smoke
+## Développement et tests hors ligne
+
+Le développement utilise un environnement éditable avec les outils de test :
 
 ```sh
+uv sync
 make test
-uv run --env-file .env mail-smoke --live
+uv run ruff check src tests
+uv run ruff format --check src tests
 ```
 
-`make test` utilise exclusivement des réponses IMAP simulées et un dépôt Git local
-pour les tests de release. Le smoke appelle directement le service sans lancer MCP :
-il découvre les dossiers sélectionnables, recherche cinq mails maximum par dossier
-et lit le premier message
-si disponible. Il n’affiche que des compteurs et statuts, sans corps ni identifiants
-de messages. `--live` est obligatoire pour autoriser une connexion réelle.
-
-Le dossier `mail-smoke/`, inclus dans ce dépôt, fournit également `make test-real`.
-Créer son fichier privé `.env` à partir de `.env.example`, puis renseigner les
-trois variables IMAP. Le YAML reste facultatif. Les fichiers privés sont ignorés
-par Git.
+`make dev` lance le serveur avec `uv run` pour le développement, avec les variables
+IMAP déjà fournies. Pour un `.env` local : `uv run --env-file .env mcp-mail`.
+`make test` utilise exclusivement des réponses IMAP simulées et un dépôt Git
+local pour les tests de release. Il ne se connecte à aucune boîte réelle.
+Après `make install`, `make test` peut réinstaller les dépendances de développement ;
+ces commandes se lancent dans un checkout de développement disposant des droits
+d’écriture, pas dans un environnement de production figé.
 
 `make build` construit le paquet ; `make release` conserve le mécanisme de release
 avec tests, changelog, commit et publication atomique vers le remote configuré.
+
+## Smoke réel, facultatif
+
+Après installation, avec un `.env` privé renseigné :
+
+```sh
+uv run --no-sync --env-file .env python -m mcp_mail.smoke --live
+```
+
+Si les variables sont déjà présentes dans l’environnement, `uv` n’est pas nécessaire :
+
+```sh
+.venv/bin/python -m mcp_mail.smoke --live
+```
+
+Le smoke appelle directement le service sans lancer MCP : il découvre les dossiers
+sélectionnables, recherche cinq mails maximum par dossier et lit le premier message
+si disponible. Il affiche seulement des compteurs et statuts. `--live` est obligatoire
+pour autoriser une connexion réelle ; aucune modification de mail n’est effectuée.
+
+Le dossier `mail-smoke/`, inclus dans ce dépôt, fournit également `make test-real`
+pour le développement. Il utilise son propre `.env` et synchronise son environnement.
+Le YAML reste facultatif. Les fichiers privés sont ignorés par Git.

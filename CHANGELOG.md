@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+- Add production installation and a launcher that never synchronizes dependencies.
+- Document deployment permissions, client configuration and development separately.
+
 ## [20261004-2] - 2026-10-04
 
 - refactor: simplify mail search and type response contracts (c048649)
