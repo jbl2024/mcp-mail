@@ -1,5 +1,10 @@
 # Changelog
 
+## [20261004-4] - 2026-10-04
+
+- feat: add explicit mail dates and global chronological search sorting (6a972c9)
+
+
 ## [20261004-3] - 2026-10-04
 
 - feat: separate production installation from MCP startup (88c5d5b)
