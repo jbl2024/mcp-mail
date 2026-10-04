@@ -7,6 +7,7 @@ from typing import Any
 
 from .config import AppConfig
 from .reader import MailReader, MailReadError
+from .results import AccountsResult
 
 
 class MailService:
@@ -23,7 +24,7 @@ class MailService:
         self._account_slots = {name: asyncio.Semaphore(1) for name in config.accounts}
         self._workers: set[asyncio.Task[Any]] = set()
 
-    def list_accounts(self) -> dict[str, Any]:
+    def list_accounts(self) -> AccountsResult:
         """Return local aliases and folder restrictions; None means unrestricted discovery."""
         return {
             "accounts": [

@@ -740,3 +740,41 @@ def test_cached_content_not_reused_after_username_change(reader, monkeypatch):
     reader.search_messages(folder="INBOX")
     assert len([c for c in reader.fake.calls if c[0] == "search"]) == 2
     assert len([c for c in reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]) == 2
+
+
+def test_page_fetch_failure_keeps_other_folder_results(multi_reader, monkeypatch):
+    fetch = multi_reader.fake.fetch
+
+    def fail_archive(uids, selectors):
+        if multi_reader.fake.current == "Archive":
+            raise RuntimeError("private protocol details")
+        return fetch(uids, selectors)
+
+    monkeypatch.setattr(multi_reader.fake, "fetch", fail_archive)
+    result = multi_reader.search_messages(limit=3)
+    assert result["total"] == 4 and result["next_offset"] == 3
+    assert result["partial"] is True
+    assert [m["folder"] for m in result["messages"]] == ["INBOX"]
+    assert result["errors"] == [
+        {"folder": "Archive", "error": "IMAP header read failed; search again"}
+    ]
+    assert "private protocol details" not in str(result)
+
+
+def test_disappearing_message_does_not_mix_page_identities(multi_reader, monkeypatch):
+    fetch = multi_reader.fake.fetch
+
+    def omit_archived_message(uids, selectors):
+        data = fetch(uids, selectors)
+        if multi_reader.fake.current == "Archive":
+            data.pop(1, None)
+        return data
+
+    monkeypatch.setattr(multi_reader.fake, "fetch", omit_archived_message)
+    result = multi_reader.search_messages(limit=3)
+    assert result["total"] == 4 and result["next_offset"] == 3
+    assert [(m["folder"], m["uid"], m["uidvalidity"]) for m in result["messages"]] == [
+        ("Archive", 2, 10),
+        ("INBOX", 1, 20),
+    ]
+    assert result["partial"] is False

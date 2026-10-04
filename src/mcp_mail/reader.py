@@ -7,7 +7,7 @@ from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import date
 from email.message import EmailMessage
-from typing import Any
+from typing import Any, cast
 
 from imapclient import IMAPClient
 
@@ -23,6 +23,19 @@ from .models import (
     parse_message,
     summary,
 )
+from .results import (
+    AttachmentResult,
+    FolderError,
+    FolderInfo,
+    MessageDetail,
+    MessageResult,
+    SearchMessage,
+    SearchResult,
+    ThreadResult,
+)
+
+# Folder and namespace travel with each UID so cross-folder pages cannot mix identities.
+type SearchHit = tuple[str, int, int]
 
 
 class MailReadError(ValueError):
@@ -114,7 +127,7 @@ class MailReader:
                 with suppress(Exception):
                     client.logout()
 
-    def _folders(self, client: IMAPClient) -> list[dict[str, Any]]:
+    def _folders(self, client: IMAPClient) -> list[FolderInfo]:
         """Discover names and selectability, retaining missing allowlisted names as unavailable."""
         listed = {name: flags for flags, _, name in client.list_folders()}
         names = self.account.folders if self.account.folders is not None else sorted(listed)
@@ -130,7 +143,7 @@ class MailReader:
             for name in names
         ]
 
-    def list_folders(self) -> list[dict[str, Any]]:
+    def list_folders(self) -> list[FolderInfo]:
         """Return accessible folder descriptors without selecting a mailbox.
 
         Raises:
@@ -153,7 +166,7 @@ class MailReader:
         before: str = "",
         limit: int = 50,
         offset: int = 0,
-    ) -> dict[str, Any]:
+    ) -> SearchResult:
         """Search on the server and download only the globally paginated headers.
 
         Args:
@@ -186,41 +199,9 @@ class MailReader:
             raise MailReadError("limit is outside the configured range")
         if type(offset) is not int or offset < 0:
             raise MailReadError("offset must be a non-negative integer")
-        criteria = ["NOT", "DELETED"]
-        for key, value in [
-            ("TEXT", query),
-            ("FROM", sender),
-            ("TO", recipient),
-            ("SUBJECT", subject),
-        ]:
-            if (
-                not isinstance(value, str)
-                or len(value) > 1000
-                or any(c in value for c in "\r\n\x00")
-            ):
-                raise MailReadError("Invalid search text")
-            if value:
-                criteria.extend([key, value])
-        for key, value in [("SEEN", seen), ("FLAGGED", flagged)]:
-            if value is not None:
-                if type(value) is not bool:
-                    raise MailReadError("Flag filters must be booleans")
-                criteria.extend([key] if value else ["UN" + key])
-        if important is not None:
-            if type(important) is not bool:
-                raise MailReadError("important must be a boolean")
-            expression = ["OR", "FLAGGED", ["KEYWORD", "$Important"]]
-            criteria.append(expression if important else ["NOT", expression])
-        dates = {}
-        for key, value in [("SINCE", since), ("BEFORE", before)]:
-            if value:
-                try:
-                    dates[key] = date.fromisoformat(value)
-                except (TypeError, ValueError) as exc:
-                    raise MailReadError("Dates must use YYYY-MM-DD") from exc
-                criteria.extend([key, dates[key]])
-        if len(dates) == 2 and dates["SINCE"] >= dates["BEFORE"]:
-            raise MailReadError("before must be after since")
+        criteria = self._search_criteria(
+            query, sender, recipient, subject, seen, flagged, important, since, before
+        )
         # A specific folder is validated by session(); the broad search discovers folders.
         with self.session(folder) as (client, validity):
             folders = (
@@ -228,62 +209,14 @@ class MailReader:
                 if folder is not None
                 else sorted(f["name"] for f in self._folders(client) if f["selectable"])
             )
-            matches = []
-            errors = []
-            searched = []
-            for name in folders:
-                try:
-                    current = validity
-                    if folder is None:
-                        current = client.select_folder(name, readonly=True).get(b"UIDVALIDITY")
-                        if type(current) is not int or current < 1:
-                            raise MailReadError("Server did not return UIDVALIDITY")
-                    cache_key = (name, current, repr(criteria))
-                    uids = self._search_cache.get(cache_key)
-                    if uids is None:
-                        uids = tuple(sorted(client.search(criteria, charset="UTF-8"), reverse=True))
-                        self._search_cache.put(cache_key, uids, len(uids))
-                    matches.extend((name, current, uid) for uid in uids)
-                    searched.append(name)
-                except Exception as exc:
-                    if folder is not None:
-                        raise MailReadError("IMAP folder search failed") from exc
-                    errors.append({"folder": name, "error": "IMAP folder search failed"})
-            page = matches[offset : offset + limit]
-            messages = []
-            for name in dict.fromkeys(hit[0] for hit in page):
-                hits = [hit for hit in page if hit[0] == name]
-                current = hits[0][1]
-                try:
-                    if folder is None:
-                        selected = client.select_folder(name, readonly=True)
-                        if selected.get(b"UIDVALIDITY") != current:
-                            raise MailReadError("UIDVALIDITY changed; search again")
-                    data = client.fetch(
-                        [hit[2] for hit in hits], [HEADER_FETCH, "FLAGS", "RFC822.SIZE"]
-                    )
-                    for _, _, uid in hits:
-                        if uid in data and HEADER_KEY in data[uid]:
-                            messages.append(
-                                summary(
-                                    parse_message(data[uid][HEADER_KEY]),
-                                    uid,
-                                    data[uid].get(b"FLAGS", ()),
-                                    data[uid].get(b"RFC822.SIZE", 0),
-                                )
-                                | {
-                                    "account": self.account.name,
-                                    "folder": name,
-                                    "uidvalidity": current,
-                                }
-                            )
-                except Exception as exc:
-                    if folder is not None:
-                        raise MailReadError("IMAP header read failed") from exc
-                    errors.append(
-                        {"folder": name, "error": "IMAP header read failed; search again"}
-                    )
-            result = {
+            matches, searched, errors = self._find_matches(
+                client, folders, criteria, folder is not None, validity
+            )
+            messages, read_errors = self._fetch_page(
+                client, matches[offset : offset + limit], folder is not None
+            )
+            errors.extend(read_errors)
+            result: SearchResult = {
                 "account": self.account.name,
                 "folder": folder,
                 "uidvalidity": validity,
@@ -298,6 +231,124 @@ class MailReader:
             if errors:
                 result["errors"] = errors
             return result
+
+    @staticmethod
+    def _search_criteria(
+        query: str,
+        sender: str,
+        recipient: str,
+        subject: str,
+        seen: bool | None,
+        flagged: bool | None,
+        important: bool | None,
+        since: str,
+        before: str,
+    ) -> list[Any]:
+        """Validate filters and build IMAPClient criteria before any network access."""
+        criteria: list[Any] = ["NOT", "DELETED"]
+        for key, text in [
+            ("TEXT", query),
+            ("FROM", sender),
+            ("TO", recipient),
+            ("SUBJECT", subject),
+        ]:
+            if not isinstance(text, str) or len(text) > 1000 or any(c in text for c in "\r\n\x00"):
+                raise MailReadError("Invalid search text")
+            if text:
+                criteria.extend([key, text])
+        for key, flag in [("SEEN", seen), ("FLAGGED", flagged)]:
+            if flag is not None:
+                if type(flag) is not bool:
+                    raise MailReadError("Flag filters must be booleans")
+                criteria.extend([key] if flag else ["UN" + key])
+        if important is not None:
+            if type(important) is not bool:
+                raise MailReadError("important must be a boolean")
+            expression = ["OR", "FLAGGED", ["KEYWORD", "$Important"]]
+            criteria.append(expression if important else ["NOT", expression])
+        dates: dict[str, date] = {}
+        for key, date_text in [("SINCE", since), ("BEFORE", before)]:
+            if date_text:
+                try:
+                    dates[key] = date.fromisoformat(date_text)
+                except (TypeError, ValueError) as exc:
+                    raise MailReadError("Dates must use YYYY-MM-DD") from exc
+                criteria.extend([key, dates[key]])
+        if len(dates) == 2 and dates["SINCE"] >= dates["BEFORE"]:
+            raise MailReadError("before must be after since")
+        return criteria
+
+    def _find_matches(
+        self,
+        client: IMAPClient,
+        folders: list[str],
+        criteria: list[Any],
+        single_folder: bool,
+        validity: int | None,
+    ) -> tuple[list[SearchHit], list[str], list[FolderError]]:
+        """Collect cached or fresh UID matches, preserving per-folder partial failures."""
+        matches: list[SearchHit] = []
+        searched: list[str] = []
+        errors: list[FolderError] = []
+        for name in folders:
+            try:
+                current = cast(int, validity)
+                if not single_folder:
+                    current = client.select_folder(name, readonly=True).get(b"UIDVALIDITY")
+                    if type(current) is not int or current < 1:
+                        raise MailReadError("Server did not return UIDVALIDITY")
+                cache_key = (name, current, repr(criteria))
+                uids = self._search_cache.get(cache_key)
+                if uids is None:
+                    uids = tuple(sorted(client.search(criteria, charset="UTF-8"), reverse=True))
+                    self._search_cache.put(cache_key, uids, len(uids))
+                matches.extend((name, current, uid) for uid in uids)
+                searched.append(name)
+            except Exception as exc:
+                if single_folder:
+                    raise MailReadError("IMAP folder search failed") from exc
+                errors.append({"folder": name, "error": "IMAP folder search failed"})
+        return matches, searched, errors
+
+    def _fetch_page(
+        self,
+        client: IMAPClient,
+        page: list[SearchHit],
+        single_folder: bool,
+    ) -> tuple[list[SearchMessage], list[FolderError]]:
+        """Fetch only paged headers, rechecking namespaces after switching folders."""
+        messages: list[SearchMessage] = []
+        errors: list[FolderError] = []
+        for name in dict.fromkeys(hit[0] for hit in page):
+            hits = [hit for hit in page if hit[0] == name]
+            current = hits[0][1]
+            try:
+                if not single_folder:
+                    selected = client.select_folder(name, readonly=True)
+                    if selected.get(b"UIDVALIDITY") != current:
+                        raise MailReadError("UIDVALIDITY changed; search again")
+                data = client.fetch(
+                    [hit[2] for hit in hits], [HEADER_FETCH, "FLAGS", "RFC822.SIZE"]
+                )
+                for _, _, uid in hits:
+                    if uid in data and HEADER_KEY in data[uid]:
+                        hit: SearchMessage = {
+                            **summary(
+                                parse_message(data[uid][HEADER_KEY]),
+                                uid,
+                                data[uid].get(b"FLAGS", ()),
+                                data[uid].get(b"RFC822.SIZE", 0),
+                            ),
+                            "account": self.account.name,
+                            "folder": name,
+                            "uidvalidity": current,
+                        }
+                        messages.append(hit)
+            except Exception as exc:
+                if single_folder:
+                    raise MailReadError("IMAP header read failed") from exc
+                errors.append({"folder": name, "error": "IMAP header read failed; search again"})
+        return messages, errors
 
     def _message(
         self, client: IMAPClient, uid: int, folder: str, uidvalidity: int
@@ -330,7 +381,7 @@ class MailReader:
             self._body_cache.put(cache_key, raw, len(raw))
         return parse_message(raw), metadata
 
-    def get_message(self, folder: str, uid: int, uidvalidity: int) -> dict[str, Any]:
+    def get_message(self, folder: str, uid: int, uidvalidity: int) -> MessageResult:
         """Return message headers, bounded Markdown and attachment descriptors.
 
         ``folder``, ``uid`` and ``uidvalidity`` must come from the same search hit.
@@ -341,16 +392,21 @@ class MailReader:
         """
         with self.session(folder, uidvalidity) as (client, validity):
             message, meta = self._message(client, uid, folder, uidvalidity)
+            detail: MessageDetail = {
+                **summary(message, uid, meta.get(b"FLAGS", ()), meta[b"RFC822.SIZE"]),
+                **body(message, self.settings.max_text_length),
+                "attachments": attachments(message),
+            }
             return {
                 "account": self.account.name,
                 "folder": folder,
                 "uidvalidity": validity,
-                "message": summary(message, uid, meta.get(b"FLAGS", ()), meta[b"RFC822.SIZE"])
-                | body(message, self.settings.max_text_length)
-                | {"attachments": attachments(message)},
+                "message": detail,
             }
 
-    def get_attachment(self, folder: str, uid: int, uidvalidity: int, index: int) -> dict[str, Any]:
+    def get_attachment(
+        self, folder: str, uid: int, uidvalidity: int, index: int
+    ) -> AttachmentResult:
         """Return base64 attachment data for an index previously listed by get_message.
 
         The complete MIME message is fetched under max_message_bytes before the
@@ -366,9 +422,7 @@ class MailReader:
             except ValueError as exc:
                 raise MailReadError(str(exc)) from exc
 
-    def get_thread(
-        self, folder: str, uid: int, uidvalidity: int, limit: int = 50
-    ) -> dict[str, Any]:
+    def get_thread(self, folder: str, uid: int, uidvalidity: int, limit: int = 50) -> ThreadResult:
         """Return linked thread headers within a bounded scan of one folder.
 
         The seed is always included in the scan; recent non-deleted UIDs are

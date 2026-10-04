@@ -33,7 +33,8 @@ def _service() -> MailService:
 async def _call(operation: str, account: str, **kwargs: Any) -> dict[str, Any]:
     """Translate safe configuration/reader failures into MCP tool errors."""
     try:
-        return await _service().call(operation, account, **kwargs)
+        # Keep the MCP schema generic while internal responses have precise contracts.
+        return dict(await _service().call(operation, account, **kwargs))
     except (ConfigError, MailReadError) as exc:
         raise ToolError(str(exc)) from exc
 
@@ -42,7 +43,7 @@ async def _call(operation: str, account: str, **kwargs: Any) -> dict[str, Any]:
 def list_accounts() -> dict[str, Any]:
     """List account aliases; folders=null means unrestricted folder access."""
     try:
-        return _service().list_accounts()
+        return dict(_service().list_accounts())
     except ConfigError as exc:
         raise ToolError(str(exc)) from exc
 

@@ -8,10 +8,11 @@ from collections.abc import Iterable
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
-from typing import Any
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
+
+from .results import AttachmentInfo, AttachmentResult, BodyResult, MessageSummary
 
 HEADER_FIELDS = "MESSAGE-ID REFERENCES IN-REPLY-TO SUBJECT FROM TO CC DATE"
 HEADER_FETCH = f"BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})]"
@@ -46,7 +47,7 @@ def message_ids(message: EmailMessage) -> list[str]:
 
 def summary(
     message: EmailMessage, uid: int, flags: Iterable[bytes | str], size: int
-) -> dict[str, Any]:
+) -> MessageSummary:
     """Return decoded headers and flag indicators without downloading a message body.
 
     ``size`` is the server-reported RFC822.SIZE. ``important`` reflects Flagged or
@@ -110,7 +111,7 @@ def attachment_bytes(part: EmailMessage) -> bytes:
     return b""
 
 
-def attachments(message: EmailMessage) -> list[dict[str, Any]]:
+def attachments(message: EmailMessage) -> list[AttachmentInfo]:
     """Return zero-based indexes and decoded sizes for the same parts used by extraction.
 
     Filenames are untrusted display metadata and must never be used as paths
@@ -128,7 +129,7 @@ def attachments(message: EmailMessage) -> list[dict[str, Any]]:
     ]
 
 
-def body(message: EmailMessage, max_length: int) -> dict[str, Any]:
+def body(message: EmailMessage, max_length: int) -> BodyResult:
     """Return a preferred body as Markdown and a character-truncation indicator.
 
     Plain text is preferred over HTML. Invalid charset bytes are replaced and
@@ -152,7 +153,7 @@ def body(message: EmailMessage, max_length: int) -> dict[str, Any]:
     return {"markdown": text[:max_length], "body_truncated": len(text) > max_length}
 
 
-def extract_attachment(message: EmailMessage, index: int, max_bytes: int) -> dict[str, Any]:
+def extract_attachment(message: EmailMessage, index: int, max_bytes: int) -> AttachmentResult:
     """Return attachment metadata and base64 content without writing a file.
 
     Args:
@@ -169,7 +170,8 @@ def extract_attachment(message: EmailMessage, index: int, max_bytes: int) -> dic
     payload = attachment_bytes(parts[index])
     if len(payload) > max_bytes:
         raise ValueError("Attachment exceeds configured size limit")
-    return attachments(message)[index] | {
+    return {
+        **attachments(message)[index],
         "encoding": "base64",
         "data": base64.b64encode(payload).decode("ascii"),
     }
