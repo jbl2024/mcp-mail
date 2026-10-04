@@ -1,12 +1,19 @@
+"""Async orchestration and trust metadata around synchronous IMAP reads."""
+
 from __future__ import annotations
 
 import asyncio
+from typing import Any
 
+from .config import AppConfig
 from .reader import MailReader, MailReadError
 
 
 class MailService:
-    def __init__(self, config):
+    """Expose account-scoped reads with at most four concurrent worker operations."""
+
+    def __init__(self, config: AppConfig) -> None:
+        """Create readers without opening connections or resolving credentials."""
         self.config = config
         self.readers = {
             name: MailReader(account, config.credentials[account.credentials], config.settings)
@@ -14,7 +21,8 @@ class MailService:
         }
         self._semaphore = asyncio.Semaphore(4)
 
-    def list_accounts(self):
+    def list_accounts(self) -> dict[str, Any]:
+        """Return local aliases and folder restrictions; None means unrestricted discovery."""
         return {
             "accounts": [
                 {
@@ -26,7 +34,24 @@ class MailService:
             ]
         }
 
-    async def call(self, operation, account, **kwargs):
+    async def call(self, operation: str, account: str, **kwargs: Any) -> dict[str, Any]:
+        """Dispatch an allowed reader operation off the event loop.
+
+        Args:
+            operation: One of the five public read operations in the allowlist below.
+            account: Configured local alias, never an arbitrary server endpoint.
+            **kwargs: Arguments for the selected reader method. Message operations
+                require the positive UIDVALIDITY returned by search.
+
+        Returns:
+            A result envelope marking all server content as untrusted data.
+
+        Raises:
+            MailReadError: Operation, alias, UIDVALIDITY or reader validation fails.
+
+        Cancelling the await does not forcibly stop an already running worker;
+        its socket timeout and session cleanup still apply.
+        """
         if account not in self.readers:
             raise MailReadError("Unknown configured account alias")
         if operation not in {

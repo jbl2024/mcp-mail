@@ -1,23 +1,39 @@
+"""MIME parsing and JSON-ready representations of untrusted mail content."""
+
 from __future__ import annotations
 
 import base64
 import re
+from collections.abc import Iterable
 from email import policy
+from email.message import EmailMessage
 from email.parser import BytesParser
+from typing import Any
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
 
 HEADER_FIELDS = "MESSAGE-ID REFERENCES IN-REPLY-TO SUBJECT FROM TO CC DATE"
 HEADER_FETCH = f"BODY.PEEK[HEADER.FIELDS ({HEADER_FIELDS})]"
+
+# PEEK is a request modifier; IMAP response keys omit it.
 HEADER_KEY = f"BODY[HEADER.FIELDS ({HEADER_FIELDS})]".encode()
 
 
-def parse_message(raw: bytes):
+def parse_message(raw: bytes) -> EmailMessage:
+    """Parse RFC 5322 bytes using the modern email policy, including header decoding.
+
+    This does not authenticate senders or validate content. Tolerated MIME defects
+    remain attached to the email object; callers must bound input size first.
+    """
     return BytesParser(policy=policy.default).parsebytes(raw)
 
 
-def message_ids(message) -> list[str]:
+def message_ids(message: EmailMessage) -> list[str]:
+    """Collect bracketed IDs from identity and reply headers, preserving duplicates.
+
+    This is a threading heuristic, not validation of global identifier uniqueness.
+    """
     return re.findall(
         r"<[^<>\s]+>",
         str(message.get("Message-ID", ""))
@@ -28,7 +44,15 @@ def message_ids(message) -> list[str]:
     )
 
 
-def summary(message, uid, flags, size):
+def summary(
+    message: EmailMessage, uid: int, flags: Iterable[bytes | str], size: int
+) -> dict[str, Any]:
+    """Return decoded headers and flag indicators without downloading a message body.
+
+    ``size`` is the server-reported RFC822.SIZE. ``important`` reflects Flagged or
+    $Important, not an assessment of content. The caller supplies folder identity
+    separately because a UID alone is insufficient to identify a message.
+    """
     flags = [f.decode(errors="replace") if isinstance(f, bytes) else str(f) for f in flags]
     return {
         "uid": uid,
@@ -47,10 +71,16 @@ def summary(message, uid, flags, size):
     }
 
 
-def attachment_parts(message):
+def attachment_parts(message: EmailMessage) -> list[EmailMessage]:
+    """Find attachments and non-text CID resources in MIME traversal order.
+
+    Attached messages and multipart attachments are returned as a single part;
+    their descendants do not become additional independently indexed attachments.
+    """
     result = []
 
-    def visit(part):
+    def visit(part: EmailMessage) -> None:
+        """Stop traversal at attachment boundaries to keep indexes unambiguous."""
         if (
             part.get_filename() is not None
             or part.get_content_disposition() == "attachment"
@@ -65,7 +95,12 @@ def attachment_parts(message):
     return result
 
 
-def attachment_bytes(part):
+def attachment_bytes(part: EmailMessage) -> bytes:
+    """Decode transfer encoding, or serialize children of an attached MIME container.
+
+    Attached message bytes are reserialized with SMTP line endings and need not
+    match the original wire bytes. This function performs no filesystem access.
+    """
     payload = part.get_payload(decode=True)
     if payload is not None:
         return payload
@@ -75,7 +110,12 @@ def attachment_bytes(part):
     return b""
 
 
-def attachments(message):
+def attachments(message: EmailMessage) -> list[dict[str, Any]]:
+    """Return zero-based indexes and decoded sizes for the same parts used by extraction.
+
+    Filenames are untrusted display metadata and must never be used as paths
+    without validation by a consuming application.
+    """
     return [
         {
             "index": i,
@@ -88,7 +128,14 @@ def attachments(message):
     ]
 
 
-def body(message, max_length):
+def body(message: EmailMessage, max_length: int) -> dict[str, Any]:
+    """Return a preferred body as Markdown and a character-truncation indicator.
+
+    Plain text is preferred over HTML. Invalid charset bytes are replaced and
+    unknown charset names fall back to UTF-8. HTML scripts, styles and images
+    are removed without fetching external resources. Links remain untrusted;
+    this is text conversion, not a sanitizer for subsequent HTML rendering.
+    """
     part = message.get_body(preferencelist=("plain", "html"))
     text = ""
     if part is not None and part not in attachment_parts(message):
@@ -105,7 +152,17 @@ def body(message, max_length):
     return {"markdown": text[:max_length], "body_truncated": len(text) > max_length}
 
 
-def extract_attachment(message, index, max_bytes):
+def extract_attachment(message: EmailMessage, index: int, max_bytes: int) -> dict[str, Any]:
+    """Return attachment metadata and base64 content without writing a file.
+
+    Args:
+        message: Parsed, size-bounded MIME message.
+        index: Zero-based index from attachments(), scoped to this message.
+        max_bytes: Maximum decoded payload size, before base64 expansion.
+
+    Raises:
+        ValueError: The index is invalid or the decoded attachment exceeds the limit.
+    """
     parts = attachment_parts(message)
     if type(index) is not int or not 0 <= index < len(parts):
         raise ValueError("Unknown attachment index")

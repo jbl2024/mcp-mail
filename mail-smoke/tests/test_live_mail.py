@@ -1,3 +1,5 @@
+"""Opt-in real-server smoke; skipped unless LIVE_MAIL=1 is explicitly provided."""
+
 import os
 from argparse import Namespace
 

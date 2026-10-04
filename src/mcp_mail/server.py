@@ -1,6 +1,9 @@
+"""Stdio MCP tools exposing only the configured read-only mail service."""
+
 from __future__ import annotations
 
 from functools import lru_cache
+from typing import Any
 
 from mcp.server import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
@@ -22,11 +25,13 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, open_wo
 
 
 @lru_cache(maxsize=1)
-def _service():
+def _service() -> MailService:
+    """Cache configuration and readers for this process; no IMAP connection is cached."""
     return MailService(load_config())
 
 
-async def _call(operation, account, **kwargs):
+async def _call(operation: str, account: str, **kwargs: Any) -> dict[str, Any]:
+    """Translate safe configuration/reader failures into MCP tool errors."""
     try:
         return await _service().call(operation, account, **kwargs)
     except (ConfigError, MailReadError) as exc:
@@ -34,7 +39,7 @@ async def _call(operation, account, **kwargs):
 
 
 @mcp.tool(annotations=READ_ONLY)
-def list_accounts() -> dict:
+def list_accounts() -> dict[str, Any]:
     """List account aliases; folders=null means unrestricted folder access."""
     try:
         return _service().list_accounts()
@@ -43,7 +48,7 @@ def list_accounts() -> dict:
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def list_folders(account: str) -> dict:
+async def list_folders(account: str) -> dict[str, Any]:
     """Discover server folders (filtered by optional allowlist) and selectability."""
     return await _call("list_folders", account)
 
@@ -63,7 +68,7 @@ async def search_messages(
     before: str = "",
     limit: int = 50,
     offset: int = 0,
-) -> dict:
+) -> dict[str, Any]:
     """Search all selectable folders by default; pass folder to search only that folder.
 
     Results are ordered by folder name, then newest UIDs within each folder.
@@ -79,13 +84,15 @@ async def search_messages(
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def get_message(account: str, folder: str, uid: int, uidvalidity: int) -> dict:
+async def get_message(account: str, folder: str, uid: int, uidvalidity: int) -> dict[str, Any]:
     """Read MIME mail as Markdown and list attachments, without setting Seen."""
     return await _call("get_message", **locals())
 
 
 @mcp.tool(annotations=READ_ONLY)
-async def get_attachment(account: str, folder: str, uid: int, uidvalidity: int, index: int) -> dict:
+async def get_attachment(
+    account: str, folder: str, uid: int, uidvalidity: int, index: int
+) -> dict[str, Any]:
     """Extract an attachment by zero-based index as base64; no local file is written."""
     return await _call("get_attachment", **locals())
 
@@ -93,12 +100,13 @@ async def get_attachment(account: str, folder: str, uid: int, uidvalidity: int, 
 @mcp.tool(annotations=READ_ONLY)
 async def get_thread(
     account: str, folder: str, uid: int, uidvalidity: int, limit: int = 50
-) -> dict:
+) -> dict[str, Any]:
     """Read linked thread headers in this folder, within a bounded recent header scan."""
     return await _call("get_thread", **locals())
 
 
-def main():
+def main() -> None:
+    """Validate configuration before serving stdio; credentials in YAML resolve on reads."""
     try:
         _service()
     except ConfigError as exc:

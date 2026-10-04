@@ -1,9 +1,12 @@
+"""Validated mail configuration with environment-only and explicit YAML modes."""
+
 from __future__ import annotations
 
 import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -14,6 +17,12 @@ class ConfigError(ValueError):
 
 @dataclass(frozen=True)
 class Settings:
+    """Resource limits; byte limits apply before base64, text limits to characters.
+
+    Socket timeouts cover individual operations, not an entire multi-folder search.
+    Thread scans and returned pages have independent bounds.
+    """
+
     request_timeout_seconds: int = 20
     max_results: int = 100
     max_message_bytes: int = 10485760
@@ -24,10 +33,20 @@ class Settings:
 
 @dataclass(frozen=True)
 class CredentialProfile:
+    """Environment variable references, with no credential values stored in configuration."""
+
     username_env: str
     password_env: str
 
     def resolve(self) -> tuple[str, str]:
+        """Return current username and password from the process environment.
+
+        Raises:
+            ConfigError: Either referenced variable is unset or empty.
+
+        Credentials are resolved per connection so configuration representations
+        do not retain secrets. Callers must not log the returned values.
+        """
         values = tuple(os.environ.get(key, "") for key in (self.username_env, self.password_env))
         if not all(values):
             raise ConfigError("Missing mail credential environment variables")
@@ -36,6 +55,12 @@ class CredentialProfile:
 
 @dataclass(frozen=True)
 class AccountConfig:
+    """A configured alias and TLS endpoint; folders=None allows server discovery.
+
+    ``credentials`` names a profile, not a password. A non-empty ``folders`` tuple
+    restricts all reader operations; it is not an IMAP permission boundary.
+    """
+
     name: str
     label: str
     host: str
@@ -47,23 +72,41 @@ class AccountConfig:
 
 @dataclass(frozen=True)
 class AppConfig:
+    """Validated settings, credential profiles and accounts keyed by local aliases."""
+
     settings: Settings
     credentials: dict[str, CredentialProfile]
     accounts: dict[str, AccountConfig]
 
 
 def config_path_from_env() -> Path | None:
+    """Return the explicit MCP_MAIL_CONFIG path, or None for environment-only mode."""
     value = os.environ.get("MCP_MAIL_CONFIG", "")
     return Path(value).expanduser() if value else None
 
 
-def _integer(value, name, maximum):
+def _integer(value: Any, name: str, maximum: int) -> int:
+    """Validate an inclusive 1..maximum integer; booleans are intentionally rejected."""
     if type(value) is not int or not 1 <= value <= maximum:
         raise ConfigError(f"{name} must be an integer between 1 and {maximum}")
     return value
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
+    """Load settings without contacting the IMAP server.
+
+    Args:
+        path: Optional YAML path, taking precedence over MCP_MAIL_CONFIG.
+
+    Returns:
+        Validated configuration. Without an explicit path or MCP_MAIL_CONFIG,
+        IMAP_HOST, IMAP_USER and IMAP_PASSWORD create the ``primary`` TLS account.
+
+    Raises:
+        ConfigError: Required environment values are missing, YAML cannot be read,
+            or configuration validation fails. Explicit YAML never falls back
+            silently; an unrequested local config.yaml is ignored.
+    """
     source = Path(path).expanduser() if path is not None else config_path_from_env()
     if source is None:
         missing = [
@@ -96,7 +139,8 @@ def load_config(path: str | Path | None = None) -> AppConfig:
     return _parse_config(raw)
 
 
-def _parse_config(raw) -> AppConfig:
+def _parse_config(raw: Any) -> AppConfig:
+    """Validate a decoded document and construct configuration without resolving secrets."""
     if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
         raise ConfigError("Configuration version must be 1")
     if set(raw) - {"version", "settings", "credentials", "accounts"}:

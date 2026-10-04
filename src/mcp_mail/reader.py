@@ -1,11 +1,17 @@
+"""Synchronous IMAP reads with independent sessions and no mailbox mutations."""
+
 from __future__ import annotations
 
 import ssl
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager, suppress
 from datetime import date
+from email.message import EmailMessage
+from typing import Any
 
 from imapclient import IMAPClient
 
+from .config import AccountConfig, CredentialProfile, Settings
 from .models import (
     HEADER_FETCH,
     HEADER_KEY,
@@ -23,12 +29,40 @@ class MailReadError(ValueError):
 
 
 class MailReader:
-    def __init__(self, account, credentials, settings, client_factory=IMAPClient):
+    """Read one configured account; each public operation owns its connection.
+
+    No session is shared across threads. Read-only selection and PEEK protect
+    normal reads; server-side account permissions remain the strongest boundary.
+    """
+
+    def __init__(
+        self,
+        account: AccountConfig,
+        credentials: CredentialProfile,
+        settings: Settings,
+        client_factory: Callable[..., IMAPClient] = IMAPClient,
+    ) -> None:
+        """Bind configuration and an injectable connection factory for offline tests."""
         self.account, self.credentials, self.settings = account, credentials, settings
         self.client_factory = client_factory
 
     @contextmanager
-    def session(self, folder=None, uidvalidity=None):
+    def session(
+        self, folder: str | None = None, uidvalidity: int | None = None
+    ) -> Iterator[tuple[IMAPClient, int | None]]:
+        """Yield an authenticated TLS client and optional selected-folder UIDVALIDITY.
+
+        Args:
+            folder: Select via EXAMINE when provided; None leaves no folder selected.
+            uidvalidity: Expected identifier namespace, checked before yielding.
+
+        Raises:
+            MailReadError: Folder validation, connection, authentication or namespace
+                checks fail. Errors from the context body are also sanitized.
+
+        Always attempts LOGOUT, including on failure. CLOSE is avoided because it
+        can expunge messages. Cleanup errors cannot mask the original result.
+        """
         if folder is not None and (
             not isinstance(folder, str) or not folder or any(c in folder for c in "\r\n\x00")
         ):
@@ -71,7 +105,8 @@ class MailReader:
                 with suppress(Exception):
                     client.logout()
 
-    def _folders(self, client):
+    def _folders(self, client: IMAPClient) -> list[dict[str, Any]]:
+        """Discover names and selectability, retaining missing allowlisted names as unavailable."""
         listed = {name: flags for flags, _, name in client.list_folders()}
         names = self.account.folders if self.account.folders is not None else sorted(listed)
         return [
@@ -86,25 +121,57 @@ class MailReader:
             for name in names
         ]
 
-    def list_folders(self):
+    def list_folders(self) -> list[dict[str, Any]]:
+        """Return accessible folder descriptors without selecting a mailbox.
+
+        Raises:
+            MailReadError: Discovery or authentication fails.
+        """
         with self.session() as (client, _):
             return self._folders(client)
 
     def search_messages(
         self,
-        folder=None,
-        query="",
-        sender="",
-        recipient="",
-        subject="",
-        seen=None,
-        flagged=None,
-        important=None,
-        since="",
-        before="",
-        limit=50,
-        offset=0,
-    ):
+        folder: str | None = None,
+        query: str = "",
+        sender: str = "",
+        recipient: str = "",
+        subject: str = "",
+        seen: bool | None = None,
+        flagged: bool | None = None,
+        important: bool | None = None,
+        since: str = "",
+        before: str = "",
+        limit: int = 50,
+        offset: int = 0,
+    ) -> dict[str, Any]:
+        """Search on the server and download only the globally paginated headers.
+
+        Args:
+            folder: A single folder, or None for every selectable accessible folder.
+            query: IMAP TEXT criterion, matching headers and body.
+            sender: FROM criterion; recipient uses TO, not CC or BCC.
+            recipient: IMAP TO criterion.
+            subject: IMAP SUBJECT criterion.
+            seen: True for read, False for unread, None for either.
+            flagged: Filter the Flagged flag, or None to leave it unrestricted.
+            important: Filter Flagged OR $Important; None disables the filter.
+            since: Inclusive internal-date lower bound, YYYY-MM-DD, or empty.
+            before: Exclusive internal-date upper bound, YYYY-MM-DD, or empty.
+            limit: Page size, between 1 and settings.max_results.
+            offset: Non-negative offset across folders, not per folder.
+
+        Returns:
+            Headers with account/folder/UID/UIDVALIDITY identities, match count and
+            next_offset. Order is folder name then descending UID. Cross-folder
+            failures set partial/errors; even an all-failed search returns partial.
+            Disappearing messages can shorten a page. No snapshot or cross-folder
+            deduplication is performed. All matching UIDs are held in memory.
+
+        Raises:
+            MailReadError: Validation, initial discovery or a single-folder operation
+                fails. Unicode searches require the server to accept UTF-8.
+        """
         if type(limit) is not int or not 1 <= limit <= self.settings.max_results:
             raise MailReadError("limit is outside the configured range")
         if type(offset) is not int or offset < 0:
@@ -218,7 +285,12 @@ class MailReader:
                 result["errors"] = errors
             return result
 
-    def _message(self, client, uid):
+    def _message(self, client: IMAPClient, uid: int) -> tuple[EmailMessage, dict[bytes, Any]]:
+        """Fetch a selected-folder message via PEEK after checking its advertised size.
+
+        Recheck actual received size to reject incorrect server metadata. A message
+        may disappear between metadata and content fetches; that is a read error.
+        """
         if type(uid) is not int or not 1 <= uid <= 4294967295:
             raise MailReadError("Invalid UID")
         metadata = client.fetch([uid], ["RFC822.SIZE", "FLAGS"]).get(uid, {})
@@ -235,7 +307,15 @@ class MailReader:
             raise MailReadError("Message exceeds configured size limit")
         return parse_message(raw), metadata
 
-    def get_message(self, folder, uid, uidvalidity):
+    def get_message(self, folder: str, uid: int, uidvalidity: int) -> dict[str, Any]:
+        """Return message headers, bounded Markdown and attachment descriptors.
+
+        ``folder``, ``uid`` and ``uidvalidity`` must come from the same search hit.
+        MailService requires a positive UIDVALIDITY before calling this method.
+
+        Raises:
+            MailReadError: Identity is stale, message is missing/oversized, or reading fails.
+        """
         with self.session(folder, uidvalidity) as (client, validity):
             message, meta = self._message(client, uid)
             return {
@@ -247,7 +327,15 @@ class MailReader:
                 | {"attachments": attachments(message)},
             }
 
-    def get_attachment(self, folder, uid, uidvalidity, index):
+    def get_attachment(self, folder: str, uid: int, uidvalidity: int, index: int) -> dict[str, Any]:
+        """Return base64 attachment data for an index previously listed by get_message.
+
+        The complete MIME message is fetched under max_message_bytes before the
+        decoded attachment is checked against max_attachment_bytes. No file is written.
+
+        Raises:
+            MailReadError: Identity, index, size limits or IMAP reads fail.
+        """
         with self.session(folder, uidvalidity) as (client, _):
             message, _ = self._message(client, uid)
             try:
@@ -255,7 +343,23 @@ class MailReader:
             except ValueError as exc:
                 raise MailReadError(str(exc)) from exc
 
-    def get_thread(self, folder, uid, uidvalidity, limit=50):
+    def get_thread(
+        self, folder: str, uid: int, uidvalidity: int, limit: int = 50
+    ) -> dict[str, Any]:
+        """Return linked thread headers within a bounded scan of one folder.
+
+        The seed is always included in the scan; recent non-deleted UIDs are
+        limited by max_thread_messages. Shared Message-ID/References/In-Reply-To
+        identifiers form a transitive connection; subjects are not considered.
+        Results use ascending UID, not sender-provided Date headers.
+
+        Returns:
+            Header summaries, scan_truncated for incomplete folder coverage, and
+            truncated when the linked messages exceed the requested result limit.
+
+        Raises:
+            MailReadError: Invalid limit, stale seed identity, oversize seed or read failure.
+        """
         if type(limit) is not int or not 1 <= limit <= self.settings.max_results:
             raise MailReadError("Invalid thread limit")
         with self.session(folder, uidvalidity) as (client, validity):

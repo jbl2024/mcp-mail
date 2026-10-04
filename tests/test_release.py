@@ -1,3 +1,5 @@
+"""Exercise release publication against temporary local Git repositories only."""
+
 from __future__ import annotations
 
 import os

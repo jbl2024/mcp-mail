@@ -1,3 +1,5 @@
+"""Offline contracts for IMAP safety, configuration, MIME parsing and MCP dispatch."""
+
 import base64
 from dataclasses import replace
 from email.message import EmailMessage
@@ -32,6 +34,8 @@ def mail(identifier="root", references=""):
 
 
 class FakeIMAP:
+    """Simulate UID responses and reject any content fetch outside the PEEK allowlist."""
+
     def __init__(self, *args, **kwargs):
         assert kwargs["use_uid"] is True
         self.calls = [("connect", kwargs)]
@@ -388,6 +392,8 @@ def test_no_folder_restriction_by_default():
 
 
 class MultiFolderIMAP(FakeIMAP):
+    """Model folder-local UID collisions, namespace changes and partial server failures."""
+
     def __init__(self):
         super().__init__(use_uid=True)
         self.folders = {
