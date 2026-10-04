@@ -2,6 +2,9 @@
 
 ## [Unreleased]
 
+- Limit active IMAP operations to one per account, retaining capacity after cancellation.
+- Add bounded in-memory UID search and MIME body caches to reduce repeated server work.
+
 - Start with IMAP_HOST, IMAP_USER and IMAP_PASSWORD only; YAML configuration is optional.
 - Use TLS on port 993 and safe defaults; explicit YAML configuration takes precedence.
 

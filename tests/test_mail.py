@@ -608,3 +608,135 @@ async def test_env_configuration_smoke(env_connection, monkeypatch, capsys):
     monkeypatch.setattr(smoke, "MailService", lambda config: service)
     await smoke.run(Namespace(config=None))
     assert capsys.readouterr().out.count('"status": "ok"') == 2
+
+
+def test_search_cache_reuses_matches_but_refreshes_flags(reader):
+    reader.search_messages(folder="INBOX", limit=1)
+    reader.search_messages(folder="INBOX", limit=1, offset=1)
+    assert len([c for c in reader.fake.calls if c[0] == "search"]) == 1
+    assert len([c for c in reader.fake.calls if c[0] == "fetch"]) == 2
+    reader.search_messages(folder="INBOX", seen=False)
+    assert len([c for c in reader.fake.calls if c[0] == "search"]) == 2
+
+
+def test_body_cache_avoids_duplicate_download(reader):
+    reader.get_message("INBOX", 1, 7)
+    reader.get_attachment("INBOX", 1, 7, 0)
+    content = [c for c in reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]
+    metadata = [c for c in reader.fake.calls if c[0] == "fetch" and "FLAGS" in c[2]]
+    assert len(content) == 1 and len(metadata) == 2
+    del reader.fake.messages[1]
+    with pytest.raises(MailReadError, match="not found"):
+        reader.get_message("INBOX", 1, 7)
+
+
+def test_cache_isolated_by_folder_and_uidvalidity(multi_reader):
+    inbox = multi_reader.get_message("INBOX", 1, 20)
+    archived = multi_reader.get_message("Archive", 1, 10)
+    assert inbox["message"]["message_id"] != archived["message"]["message_id"]
+    multi_reader.fake.validities["INBOX"] = 21
+    multi_reader.fake.folders["INBOX"][1] = mail("replacement")
+    assert multi_reader.get_message("INBOX", 1, 21)["message"]["message_id"] == (
+        "<replacement@example.test>"
+    )
+    assert (
+        len([c for c in multi_reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]) == 3
+    )
+
+
+def test_reader_cache_expiry(reader):
+    clock = [0.0]
+    reader._search_cache.clock = reader._body_cache.clock = lambda: clock[0]
+    reader.search_messages(folder="INBOX")
+    reader.get_message("INBOX", 1, 7)
+    clock[0] = 11
+    reader.search_messages(folder="INBOX")
+    reader.get_message("INBOX", 1, 7)
+    assert len([c for c in reader.fake.calls if c[0] == "search"]) == 2
+    assert len([c for c in reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]) == 1
+    clock[0] = 31
+    reader.get_message("INBOX", 1, 7)
+    assert len([c for c in reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]) == 2
+
+
+def test_cache_weight_expiry_and_lru():
+    from mcp_mail.cache import MemoryCache
+
+    clock = [0.0]
+    cache = MemoryCache(ttl=10, max_weight=4, max_entries=2, clock=lambda: clock[0])
+    cache.put("a", b"aa", 2)
+    cache.put("b", b"bb", 2)
+    assert cache.get("a") == b"aa"
+    cache.put("c", b"cc", 2)
+    assert cache.get("b") is None
+    cache.put("large", b"large", 5)
+    assert cache.get("large") is None
+    clock[0] = 10
+    assert cache.get("a") is None and cache.get("c") is None
+
+
+async def test_cancelled_worker_keeps_account_slot(config):
+    import asyncio
+    from threading import Event
+
+    service = MailService(config)
+    loop = asyncio.get_running_loop()
+    entered = asyncio.Event()
+    release = Event()
+    calls = []
+
+    class BlockingReader:
+        def list_folders(self):
+            calls.append("started")
+            loop.call_soon_threadsafe(entered.set)
+            assert release.wait(timeout=5)
+            return []
+
+    service.readers["primary"] = BlockingReader()
+    first = asyncio.create_task(service.call("list_folders", "primary"))
+    second = None
+    try:
+        await asyncio.wait_for(entered.wait(), timeout=2)
+        first.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await first
+        assert service._account_slots["primary"].locked()
+        assert len(service._workers) == 1
+        second = asyncio.create_task(service.call("list_folders", "primary"))
+        await asyncio.sleep(0)
+        assert calls == ["started"]
+        release.set()
+        await asyncio.wait_for(second, timeout=2)
+        assert calls == ["started", "started"]
+        assert not service._account_slots["primary"].locked()
+    finally:
+        release.set()
+        if second is not None:
+            await asyncio.gather(second, return_exceptions=True)
+
+
+async def test_failed_worker_releases_slots(config):
+    service = MailService(config)
+
+    class FailingReader:
+        def list_folders(self):
+            raise MailReadError("simulated failure")
+
+    service.readers["primary"] = FailingReader()
+    with pytest.raises(MailReadError):
+        await service.call("list_folders", "primary")
+    assert not service._account_slots["primary"].locked()
+    assert not service._workers
+
+
+def test_cached_content_not_reused_after_username_change(reader, monkeypatch):
+    reader.get_message("INBOX", 1, 7)
+    reader.search_messages(folder="INBOX")
+    monkeypatch.setenv("IMAP_USER", "different-user@example.test")
+    reader.fake.messages[1] = mail("different-mailbox")
+    assert reader.get_message("INBOX", 1, 7)["message"]["message_id"] == (
+        "<different-mailbox@example.test>"
+    )
+    reader.search_messages(folder="INBOX")
+    assert len([c for c in reader.fake.calls if c[0] == "search"]) == 2
+    assert len([c for c in reader.fake.calls if c[0] == "fetch" and "BODY.PEEK[]" in c[2]]) == 2

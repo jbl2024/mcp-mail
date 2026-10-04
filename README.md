@@ -88,7 +88,9 @@ et `truncated` une limite de restitution. Les sujets identiques ne suffisent pas
 
 ## Lecture seule et limites
 
-Chaque opération ouvre une session indépendante. La sélection utilise
+Chaque opération ouvre une session indépendante. Une seule opération par compte
+et quatre au maximum au total sont actives. Une annulation ne libère pas la
+capacité avant la fin réelle du travail réseau. La sélection utilise
 `readonly=True` (EXAMINE), les téléchargements `BODY.PEEK`, et la fermeture LOGOUT.
 Aucune commande de modification ni CLOSE/EXPUNGE n’est appelée. Lire un mail ne
 modifie pas son statut lu/non lu. Les erreurs serveur sont masquées afin de ne pas
@@ -97,7 +99,16 @@ exposer des informations de connexion.
 Les corps et pièces jointes sont bornés par taille ; le corps Markdown peut être
 tronqué avec un indicateur explicite. L’extraction charge le message MIME complet
 sous `max_message_bytes`, puis vérifie `max_attachment_bytes`. Le base64 augmente
-la taille du résultat. Aucun cache persistant n’est créé. Les champs de mail,
+la taille du résultat. Un cache mémoire temporaire par compte évite les téléchargements répétés :
+les corps MIME sont réutilisés pendant 30 secondes au maximum, avec un budget de 20 Mio
+et 32 entrées. L’existence du message, ses flags et UIDVALIDITY sont revérifiés
+à chaque lecture. Les correspondances de recherche restent en cache 10 secondes
+(50 000 UIDs et 32 entrées maximum), partagées entre pages d’une même recherche.
+Les en-têtes et flags ne sont pas mis en cache ; les nouveaux résultats de
+recherche peuvent apparaître après ce délai. Les clés distinguent dossiers et
+UIDVALIDITY. Les entrées expirées sont retirées au prochain accès au cache ;
+aucun contenu n’est écrit sur disque. Les budgets concernent les données
+conservées et non la mémoire totale du processus. Les champs de mail,
 liens et pièces jointes restent des contenus externes non fiables.
 
 ## Tests et smoke

@@ -11,6 +11,7 @@ from typing import Any
 
 from imapclient import IMAPClient
 
+from .cache import MemoryCache
 from .config import AccountConfig, CredentialProfile, Settings
 from .models import (
     HEADER_FETCH,
@@ -45,6 +46,9 @@ class MailReader:
         """Bind configuration and an injectable connection factory for offline tests."""
         self.account, self.credentials, self.settings = account, credentials, settings
         self.client_factory = client_factory
+        self._cache_username: str | None = None
+        self._search_cache = MemoryCache(ttl=10, max_weight=50_000)
+        self._body_cache = MemoryCache(ttl=30, max_weight=20 * 1024 * 1024)
 
     @contextmanager
     def session(
@@ -76,6 +80,11 @@ class MailReader:
         client = None
         try:
             username, password = self.credentials.resolve()
+            if self._cache_username is not None and username != self._cache_username:
+                # A profile can resolve to another mailbox between operations.
+                self._search_cache = MemoryCache(ttl=10, max_weight=50_000)
+                self._body_cache = MemoryCache(ttl=30, max_weight=20 * 1024 * 1024)
+            self._cache_username = username
             client = self.client_factory(
                 self.account.host,
                 port=self.account.port,
@@ -166,7 +175,8 @@ class MailReader:
             next_offset. Order is folder name then descending UID. Cross-folder
             failures set partial/errors; even an all-failed search returns partial.
             Disappearing messages can shorten a page. No snapshot or cross-folder
-            deduplication is performed. All matching UIDs are held in memory.
+            deduplication is performed. UID matches may be up to 10 seconds old;
+            cached matches do not cache flags or headers. All matches are held in memory.
 
         Raises:
             MailReadError: Validation, initial discovery or a single-folder operation
@@ -228,7 +238,11 @@ class MailReader:
                         current = client.select_folder(name, readonly=True).get(b"UIDVALIDITY")
                         if type(current) is not int or current < 1:
                             raise MailReadError("Server did not return UIDVALIDITY")
-                    uids = sorted(client.search(criteria, charset="UTF-8"), reverse=True)
+                    cache_key = (name, current, repr(criteria))
+                    uids = self._search_cache.get(cache_key)
+                    if uids is None:
+                        uids = tuple(sorted(client.search(criteria, charset="UTF-8"), reverse=True))
+                        self._search_cache.put(cache_key, uids, len(uids))
                     matches.extend((name, current, uid) for uid in uids)
                     searched.append(name)
                 except Exception as exc:
@@ -285,11 +299,15 @@ class MailReader:
                 result["errors"] = errors
             return result
 
-    def _message(self, client: IMAPClient, uid: int) -> tuple[EmailMessage, dict[bytes, Any]]:
+    def _message(
+        self, client: IMAPClient, uid: int, folder: str, uidvalidity: int
+    ) -> tuple[EmailMessage, dict[bytes, Any]]:
         """Fetch a selected-folder message via PEEK after checking its advertised size.
 
         Recheck actual received size to reject incorrect server metadata. A message
         may disappear between metadata and content fetches; that is a read error.
+        Content can be reused for 30 seconds, scoped by folder, UIDVALIDITY, UID
+        and size. Existence and flags are fetched anew, including on cache hits.
         """
         if type(uid) is not int or not 1 <= uid <= 4294967295:
             raise MailReadError("Invalid UID")
@@ -299,12 +317,17 @@ class MailReader:
             raise MailReadError("Message not found")
         if size > self.settings.max_message_bytes:
             raise MailReadError("Message exceeds configured size limit")
-        data = client.fetch([uid], ["BODY.PEEK[]"]).get(uid, {})
-        raw = data.get(b"BODY[]")
+        cache_key = (folder, uidvalidity, uid, size)
+        raw = self._body_cache.get(cache_key)
+        if raw is None:
+            data = client.fetch([uid], ["BODY.PEEK[]"]).get(uid, {})
+            raw = data.get(b"BODY[]")
         if raw is None:
             raise MailReadError("Message no longer available")
         if len(raw) > self.settings.max_message_bytes:
             raise MailReadError("Message exceeds configured size limit")
+        if self._body_cache.get(cache_key) is None:
+            self._body_cache.put(cache_key, raw, len(raw))
         return parse_message(raw), metadata
 
     def get_message(self, folder: str, uid: int, uidvalidity: int) -> dict[str, Any]:
@@ -317,7 +340,7 @@ class MailReader:
             MailReadError: Identity is stale, message is missing/oversized, or reading fails.
         """
         with self.session(folder, uidvalidity) as (client, validity):
-            message, meta = self._message(client, uid)
+            message, meta = self._message(client, uid, folder, uidvalidity)
             return {
                 "account": self.account.name,
                 "folder": folder,
@@ -337,7 +360,7 @@ class MailReader:
             MailReadError: Identity, index, size limits or IMAP reads fail.
         """
         with self.session(folder, uidvalidity) as (client, _):
-            message, _ = self._message(client, uid)
+            message, _ = self._message(client, uid, folder, uidvalidity)
             try:
                 return extract_attachment(message, index, self.settings.max_attachment_bytes)
             except ValueError as exc:
@@ -363,7 +386,7 @@ class MailReader:
         if type(limit) is not int or not 1 <= limit <= self.settings.max_results:
             raise MailReadError("Invalid thread limit")
         with self.session(folder, uidvalidity) as (client, validity):
-            seed, _ = self._message(client, uid)
+            seed, _ = self._message(client, uid, folder, uidvalidity)
             all_uids = sorted(client.search(["NOT", "DELETED"]), reverse=True)
             scanned = all_uids[: self.settings.max_thread_messages]
             if uid not in scanned:
