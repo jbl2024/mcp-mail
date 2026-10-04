@@ -2,6 +2,7 @@
 
 import base64
 from dataclasses import replace
+from datetime import UTC
 from email.message import EmailMessage
 from pathlib import Path
 
@@ -67,7 +68,13 @@ class FakeIMAP:
         return list(self.messages)
 
     def fetch(self, uids, selectors):
-        assert set(selectors) <= {HEADER_FETCH, "FLAGS", "RFC822.SIZE", "BODY.PEEK[]"}
+        assert set(selectors) <= {
+            HEADER_FETCH,
+            "FLAGS",
+            "RFC822.SIZE",
+            "BODY.PEEK[]",
+            "INTERNALDATE",
+        }
         self.calls.append(("fetch", list(uids), selectors))
         result = {}
         for uid in uids:
@@ -80,6 +87,8 @@ class FakeIMAP:
                     result[uid][HEADER_KEY] = raw.split(b"\n\n", 1)[0] + b"\n\n"
                 elif selector == "BODY.PEEK[]":
                     result[uid][b"BODY[]"] = raw
+                elif selector == "INTERNALDATE":
+                    result[uid][b"INTERNALDATE"] = None
                 elif selector == "FLAGS":
                     result[uid][b"FLAGS"] = (b"\\Flagged",) if uid == 1 else ()
                 else:
@@ -778,3 +787,127 @@ def test_disappearing_message_does_not_mix_page_identities(multi_reader, monkeyp
         ("INBOX", 1, 20),
     ]
     assert result["partial"] is False
+
+
+@pytest.mark.parametrize("sort_by", ["sent_at", "received_at"])
+def test_latest_date_beyond_uid_page(reader, monkeypatch, sort_by):
+    from datetime import datetime
+
+    reader.fake.messages = {}
+    for uid in range(1, 16):
+        msg = parse_message(mail(str(uid)))
+        msg["Date"] = (
+            "Sun, 04 Oct 2026 06:00:00 +0200" if uid == 1 else ("Sat, 03 Oct 2026 06:00:00 +0000")
+        )
+        reader.fake.messages[uid] = msg.as_bytes()
+    fetch = reader.fake.fetch
+
+    def dated_fetch(uids, selectors):
+        result = fetch(uids, selectors)
+        for uid, data in result.items():
+            if "INTERNALDATE" in selectors:
+                data[b"INTERNALDATE"] = datetime(2026, 10, 4 if uid == 1 else 3, tzinfo=UTC)
+        return result
+
+    monkeypatch.setattr(reader.fake, "fetch", dated_fetch)
+    result = reader.search_messages(folder="INBOX", limit=1, sort_by=sort_by)
+    assert result["messages"][0]["uid"] == 1
+    assert result["sort_complete"] and not result["partial"]
+    assert result["next_offset"] == 1 and result["total"] == 15
+    assert result["messages"][0]["sent_at"] == "2026-10-04T04:00:00+00:00"
+    assert result["messages"][0]["received_at"] == "2026-10-04T00:00:00+00:00"
+    assert reader.get_message("INBOX", 1, 7)["message"]["received_at"] == (
+        "2026-10-04T00:00:00+00:00"
+    )
+    assert all(
+        "BODY.PEEK[]" not in c[2]
+        for c in reader.fake.calls
+        if c[0] == "fetch" and HEADER_FETCH in c[2]
+    )
+
+
+def test_date_sort_timezone_unknown_and_pagination(reader):
+    for uid, date in [
+        (1, "Sun, 04 Oct 2026 06:00:00 +0200"),
+        (2, "Sun, 04 Oct 2026 05:00:00 +0000"),
+        (3, "invalid"),
+    ]:
+        msg = parse_message(reader.fake.messages[uid])
+        msg["Date"] = date
+        reader.fake.messages[uid] = msg.as_bytes()
+    result = reader.search_messages(folder="INBOX", sort_by="sent_at")
+    assert [m["uid"] for m in result["messages"]] == [2, 1, 3]
+    assert result["partial"] and not result["sort_complete"]
+    assert result["messages"][-1]["sent_at"] is None
+    ascending = reader.search_messages(
+        folder="INBOX", sort_by="sent_at", sort_order="asc", limit=1, offset=1
+    )
+    assert ascending["messages"][0]["uid"] == 2
+
+
+@pytest.mark.parametrize("kwargs", [{"sort_by": "bad"}, {"sort_order": "bad"}])
+def test_invalid_sort_no_connection(reader, kwargs):
+    with pytest.raises(MailReadError):
+        reader.search_messages(**kwargs)
+    assert len(reader.fake.calls) == 1
+
+
+def test_date_sort_cross_folder_failure(multi_reader, monkeypatch):
+    fetch = multi_reader.fake.fetch
+
+    def fail_archive(uids, selectors):
+        if multi_reader.fake.current == "Archive":
+            raise RuntimeError("private protocol details")
+        return fetch(uids, selectors)
+
+    monkeypatch.setattr(multi_reader.fake, "fetch", fail_archive)
+    result = multi_reader.search_messages(sort_by="received_at", limit=1)
+    assert result["partial"] and not result["sort_complete"]
+    assert result["messages"][0]["folder"] == "INBOX"
+    assert "private protocol details" not in str(result)
+
+
+def test_normalized_date_unknown_timezone():
+    from mcp_mail.models import normalized_date
+
+    assert normalized_date("Sun, 04 Oct 2026 06:00:00 -0000") is None
+    assert normalized_date(None) is None
+
+
+def test_date_sort_global_folder_order(multi_reader, monkeypatch):
+    from datetime import UTC, datetime
+
+    fetch = multi_reader.fake.fetch
+
+    def dated_fetch(uids, selectors):
+        data = fetch(uids, selectors)
+        for metadata in data.values():
+            metadata[b"INTERNALDATE"] = datetime(
+                2026, 10, 4 if multi_reader.fake.current == "Sent" else 3, tzinfo=UTC
+            )
+        return data
+
+    monkeypatch.setattr(multi_reader.fake, "fetch", dated_fetch)
+    result = multi_reader.search_messages(sort_by="received_at", limit=1)
+    assert result["sort_complete"] and not result["partial"]
+    assert result["messages"][0]["folder"] == "Sent"
+    assert result["messages"][0]["uidvalidity"] == 30
+    assert result["next_offset"] == 1
+
+
+def test_date_sort_disappearing_message(reader, monkeypatch):
+    from datetime import UTC, datetime
+
+    fetch = reader.fake.fetch
+
+    def omit_message(uids, selectors):
+        data = fetch(uids, selectors)
+        data.pop(1, None)
+        for metadata in data.values():
+            metadata[b"INTERNALDATE"] = datetime(2026, 10, 4, tzinfo=UTC)
+        return data
+
+    monkeypatch.setattr(reader.fake, "fetch", omit_message)
+    result = reader.search_messages(folder="INBOX", sort_by="received_at", limit=1)
+    assert result["partial"] and not result["sort_complete"]
+    assert result["total"] == 3 and result["next_offset"] == 1

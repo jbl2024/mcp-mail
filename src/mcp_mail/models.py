@@ -5,9 +5,11 @@ from __future__ import annotations
 import base64
 import re
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from email import policy
 from email.message import EmailMessage
 from email.parser import BytesParser
+from email.utils import parsedate_to_datetime
 
 from bs4 import BeautifulSoup
 from markdownify import markdownify
@@ -45,8 +47,23 @@ def message_ids(message: EmailMessage) -> list[str]:
     )
 
 
+def normalized_date(value: object) -> str | None:
+    """Return an aware UTC timestamp, or None for invalid/unknown-zone dates."""
+    try:
+        parsed = value if isinstance(value, datetime) else parsedate_to_datetime(str(value))
+        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            return None
+        return parsed.astimezone(UTC).isoformat()
+    except (ValueError, TypeError, OverflowError, IndexError):
+        return None
+
+
 def summary(
-    message: EmailMessage, uid: int, flags: Iterable[bytes | str], size: int
+    message: EmailMessage,
+    uid: int,
+    flags: Iterable[bytes | str],
+    size: int,
+    received_at: object = None,
 ) -> MessageSummary:
     """Return decoded headers and flag indicators without downloading a message body.
 
@@ -63,6 +80,8 @@ def summary(
         "to": str(message.get("To", "")),
         "cc": str(message.get("Cc", "")),
         "date": str(message.get("Date", "")),
+        "sent_at": normalized_date(message.get("Date", "")),
+        "received_at": normalized_date(received_at),
         "references": message_ids(message),
         "flags": flags,
         "seen": "\\Seen" in flags,

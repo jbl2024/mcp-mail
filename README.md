@@ -219,3 +219,27 @@ pour autoriser une connexion réelle ; aucune modification de mail n’est effec
 Le dossier `mail-smoke/`, inclus dans ce dépôt, fournit également `make test-real`
 pour le développement. Il utilise son propre `.env` et synchronise son environnement.
 Le YAML reste facultatif. Les fichiers privés sont ignorés par Git.
+
+### Dates et ordre des recherches
+
+Le tri par défaut reste le nom du dossier puis les UID décroissants :
+un UID indique l'ordre d'ajout dans ce dossier, pas la date d'envoi.
+Pour obtenir le dernier mail reçu, utiliser
+`search_messages(account="primary", sort_by="received_at", sort_order="desc", limit=1)`.
+Pour la date déclarée par l'expéditeur, utiliser `sort_by="sent_at"`.
+`sort_order="asc"` permet aussi un ordre croissant.
+
+`sent_at` correspond à l'en-tête `Date`, `received_at` à IMAP `INTERNALDATE`.
+Ces champs sont des dates ISO 8601 en UTC, ou `null` si la date est absente,
+invalide ou sans fuseau connu. Le champ historique `date` est conservé.
+Les filtres `since` et `before` restent fondés sur la date interne IMAP.
+
+Le tri par date lit les en-têtes de tous les messages correspondants par lots
+de 100, sans télécharger les corps, puis applique la pagination globalement.
+Il fonctionne sans extension IMAP SORT, mais peut coûter davantage sur une
+grande boîte. Les dates inconnues sont placées à la fin dans les deux sens.
+`total` compte les correspondances de recherche ; `next_offset` indique
+une autre page disponible. `sort_complete=false` ou `partial=true`
+interdit de garantir le message le plus récent, notamment si une date manque,
+un message disparaît pendant le scan ou un dossier échoue.
+La pagination reste vivante, sans instantané stable.

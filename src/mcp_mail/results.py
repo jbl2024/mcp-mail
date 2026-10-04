@@ -20,6 +20,8 @@ MessageSummary = TypedDict(
         "to": str,
         "cc": str,
         "date": str,
+        "sent_at": str | None,
+        "received_at": str | None,
         "references": list[str],
         "flags": list[str],
         "seen": bool,
@@ -54,6 +56,9 @@ class SearchResult(TypedDict):
     folders_queried: list[str]
     total: int
     offset: int
+    sort_by: str
+    sort_order: str
+    sort_complete: bool
     order: str
     messages: list[SearchMessage]
     next_offset: int | None

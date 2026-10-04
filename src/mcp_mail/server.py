@@ -69,10 +69,19 @@ async def search_messages(
     before: str = "",
     limit: int = 50,
     offset: int = 0,
+    sort_by: str = "uid",
+    sort_order: str = "desc",
 ) -> dict[str, Any]:
     """Search all selectable folders by default; pass folder to search only that folder.
 
-    Results are ordered by folder name, then newest UIDs within each folder.
+    Default order is folder name then descending UID, not chronological dates.
+    For latest received mail use sort_by="received_at", sort_order="desc", limit=1.
+    For latest sender date use sort_by="sent_at". Date sorting covers ALL matches
+    across folders before pagination and may require reading many headers.
+    sent_at is the sender Date header; received_at is IMAP INTERNALDATE.
+    Both are UTC ISO timestamps or null; date retains the original Date header.
+    Unknown dates sort last. partial=True or sort_complete=False means a global
+    latest message cannot be guaranteed. next_offset indicates another page.
     Each message includes account, folder, UID and UIDVALIDITY.
     query searches TEXT (headers and body). Partial failures are reported explicitly.
 
