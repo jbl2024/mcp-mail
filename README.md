@@ -7,16 +7,13 @@ Aucun calendrier, envoi, changement de flags, déplacement ou suppression.
 
 ```sh
 uv sync
-cp config.example.yaml config.yaml
 cp .env.example .env
 ```
 
-Renseigner les variables de connexion dans `.env`, puis adapter les comptes dans
-`config.yaml`. Tous les dossiers du serveur sont accessibles par défaut. Une liste
-`folders` facultative permet de restreindre les dossiers accessibles. Les identifiants sont uniquement
-référencés par noms de variables d’environnement. TLS avec vérification des certificats
-est obligatoire : `security: tls` (port 993) ou `security: starttls` (port 143).
-Plusieurs comptes et profils de connexion sont possibles.
+Renseigner seulement trois variables dans `.env` : `IMAP_HOST`, `IMAP_USER` et
+`IMAP_PASSWORD`. Le serveur crée le compte `primary`, se connecte en TLS sur le
+port 993 avec vérification des certificats et découvre tous les dossiers.
+Les délais et limites de taille utilisent des valeurs par défaut.
 
 ```sh
 uv run --env-file .env mcp-mail
@@ -24,7 +21,23 @@ uv run --env-file .env mcp-mail
 
 Le transport MCP est stdio. Pour un client MCP, utiliser `uv` avec les arguments
 `run`, `--directory`, le chemin du projet, `--env-file`, le chemin du fichier privé,
-et `mcp-mail`. `MCP_MAIL_CONFIG` choisit le fichier YAML (défaut : `config.yaml`).
+et `mcp-mail`. Le client peut aussi fournir directement les trois variables
+d’environnement au processus. `.env` est chargé par `uv --env-file`.
+
+### Configuration avancée facultative
+
+Pour plusieurs comptes, STARTTLS, un port particulier, une restriction de dossiers
+ou des limites personnalisées, copier `config.example.yaml` vers `config.yaml`,
+puis définir `MCP_MAIL_CONFIG=./config.yaml`. Ce fichier est prioritaire sur le
+mode à trois variables. Un fichier explicitement demandé mais invalide provoque
+une erreur ; il n’y a pas de repli silencieux vers une autre connexion.
+Sans `MCP_MAIL_CONFIG`, un éventuel fichier `config.yaml` local est ignoré.
+Le smoke accepte également `--config config.yaml`.
+
+Les identifiants du YAML sont uniquement référencés par noms de variables
+d’environnement. TLS avec vérification des certificats est obligatoire :
+`security: tls` (port 993) ou `security: starttls` (port 143).
+Une liste `folders` facultative permet de restreindre les dossiers accessibles.
 
 ## Outils
 
@@ -91,7 +104,7 @@ liens et pièces jointes restent des contenus externes non fiables.
 
 ```sh
 make test
-uv run --env-file .env mail-smoke --config config.yaml --live
+uv run --env-file .env mail-smoke --live
 ```
 
 `make test` utilise exclusivement des réponses IMAP simulées et un dépôt Git local
@@ -102,8 +115,9 @@ si disponible. Il n’affiche que des compteurs et statuts, sans corps ni identi
 de messages. `--live` est obligatoire pour autoriser une connexion réelle.
 
 Le dossier `mail-smoke/`, inclus dans ce dépôt, fournit également `make test-real`.
-Créer ses fichiers privés `config.yaml` et `.env` à partir des exemples, puis
-renseigner les paramètres IMAP. Ces fichiers privés restent ignorés par Git.
+Créer son fichier privé `.env` à partir de `.env.example`, puis renseigner les
+trois variables IMAP. Le YAML reste facultatif. Les fichiers privés sont ignorés
+par Git.
 
 `make build` construit le paquet ; `make release` conserve le mécanisme de release
 avec tests, changelog, commit et publication atomique vers le remote configuré.

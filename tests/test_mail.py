@@ -85,8 +85,8 @@ class FakeIMAP:
 
 @pytest.fixture
 def config(monkeypatch):
-    monkeypatch.setenv("MAIL_USERNAME", "mail-user@example.test")
-    monkeypatch.setenv("MAIL_PASSWORD", "fictional-test-value")
+    monkeypatch.setenv("IMAP_USER", "mail-user@example.test")
+    monkeypatch.setenv("IMAP_PASSWORD", "fictional-test-value")
     config = load_config("config.example.yaml")
     return replace(
         config, accounts={"primary": replace(config.accounts["primary"], folders=("INBOX",))}
@@ -517,3 +517,88 @@ async def test_smoke_discovers_folders(config, multi_reader, monkeypatch, capsys
     output = capsys.readouterr().out
     assert output.count('"status": "ok"') == 3
     assert "Parent" not in output
+
+
+@pytest.fixture
+def env_connection(monkeypatch, tmp_path):
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.delenv("MCP_MAIL_CONFIG", raising=False)
+    monkeypatch.setenv("IMAP_HOST", "imap.example.test")
+    monkeypatch.setenv("IMAP_USER", "mail-user@example.test")
+    monkeypatch.setenv("IMAP_PASSWORD", "fictional-test-value")
+    return tmp_path
+
+
+def test_three_variables_are_sufficient(env_connection):
+    config = load_config()
+    account = config.accounts["primary"]
+    assert account.host == "imap.example.test"
+    assert account.port == 993 and account.security == "tls"
+    assert account.folders is None
+    assert config.credentials["default"].resolve() == (
+        "mail-user@example.test",
+        "fictional-test-value",
+    )
+    assert "fictional-test-value" not in repr(config)
+
+
+@pytest.mark.parametrize("key", ["IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD"])
+def test_missing_connection_variable(env_connection, monkeypatch, key):
+    monkeypatch.delenv(key)
+    with pytest.raises(ConfigError, match=key) as error:
+        load_config()
+    assert "fictional-test-value" not in str(error.value)
+
+
+def test_env_host_validated(env_connection, monkeypatch):
+    monkeypatch.setenv("IMAP_HOST", "https://imap.example.test")
+    with pytest.raises(ConfigError, match="hostname"):
+        load_config()
+
+
+def test_unrequested_local_yaml_is_ignored(env_connection):
+    (env_connection / "config.yaml").write_text("invalid: file")
+    assert load_config().accounts["primary"].host == "imap.example.test"
+
+
+def test_explicit_yaml_has_precedence(env_connection, monkeypatch):
+    raw = {
+        "version": 1,
+        "credentials": {"default": {"username_env": "IMAP_USER", "password_env": "IMAP_PASSWORD"}},
+        "accounts": [
+            {
+                "name": "custom",
+                "host": "other.example.test",
+                "port": 143,
+                "security": "starttls",
+                "credentials": "default",
+            }
+        ],
+    }
+    path = env_connection / "advanced.yaml"
+    path.write_text(yaml.safe_dump(raw))
+    monkeypatch.setenv("MCP_MAIL_CONFIG", str(path))
+    assert load_config().accounts["custom"].security == "starttls"
+    monkeypatch.setenv("MCP_MAIL_CONFIG", str(env_connection / "missing.yaml"))
+    assert load_config(path).accounts["custom"].host == "other.example.test"
+    with pytest.raises(ConfigError, match="Cannot read"):
+        load_config()
+
+
+async def test_env_configuration_smoke(env_connection, monkeypatch, capsys):
+    from argparse import Namespace
+
+    from mcp_mail import smoke
+
+    config = load_config()
+    reader = MailReader(
+        config.accounts["primary"],
+        config.credentials["default"],
+        config.settings,
+        client_factory=lambda *args, **kwargs: FakeIMAP(**kwargs),
+    )
+    service = MailService(config)
+    service.readers["primary"] = reader
+    monkeypatch.setattr(smoke, "MailService", lambda config: service)
+    await smoke.run(Namespace(config=None))
+    assert capsys.readouterr().out.count('"status": "ok"') == 2

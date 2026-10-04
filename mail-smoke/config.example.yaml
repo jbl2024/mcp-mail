@@ -8,8 +8,8 @@ settings:
   max_thread_messages: 1000
 credentials:
   default:
-    username_env: MAIL_USERNAME
-    password_env: MAIL_PASSWORD
+    username_env: IMAP_USER
+    password_env: IMAP_PASSWORD
 accounts:
   - name: primary
     label: Primary mailbox

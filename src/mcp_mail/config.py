@@ -52,8 +52,9 @@ class AppConfig:
     accounts: dict[str, AccountConfig]
 
 
-def config_path_from_env() -> Path:
-    return Path(os.environ.get("MCP_MAIL_CONFIG", "config.yaml")).expanduser()
+def config_path_from_env() -> Path | None:
+    value = os.environ.get("MCP_MAIL_CONFIG", "")
+    return Path(value).expanduser() if value else None
 
 
 def _integer(value, name, maximum):
@@ -63,10 +64,39 @@ def _integer(value, name, maximum):
 
 
 def load_config(path: str | Path | None = None) -> AppConfig:
-    try:
-        raw = yaml.safe_load(Path(path or config_path_from_env()).read_text())
-    except (OSError, yaml.YAMLError) as exc:
-        raise ConfigError("Cannot read mail configuration") from exc
+    source = Path(path).expanduser() if path is not None else config_path_from_env()
+    if source is None:
+        missing = [
+            key for key in ("IMAP_HOST", "IMAP_USER", "IMAP_PASSWORD") if not os.environ.get(key)
+        ]
+        if missing:
+            raise ConfigError("Missing environment variable(s): " + ", ".join(missing))
+        raw = {
+            "version": 1,
+            "credentials": {
+                "default": {
+                    "username_env": "IMAP_USER",
+                    "password_env": "IMAP_PASSWORD",
+                }
+            },
+            "accounts": [
+                {
+                    "name": "primary",
+                    "label": "Primary mailbox",
+                    "host": os.environ["IMAP_HOST"],
+                    "credentials": "default",
+                }
+            ],
+        }
+    else:
+        try:
+            raw = yaml.safe_load(source.read_text())
+        except (OSError, yaml.YAMLError) as exc:
+            raise ConfigError("Cannot read mail configuration") from exc
+    return _parse_config(raw)
+
+
+def _parse_config(raw) -> AppConfig:
     if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
         raise ConfigError("Configuration version must be 1")
     if set(raw) - {"version", "settings", "credentials", "accounts"}:
